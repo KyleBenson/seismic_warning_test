@@ -12,6 +12,7 @@ import time
 import asyncore
 import socket
 import json
+import os
 
 
 def parse_args(args):
@@ -29,20 +30,22 @@ def parse_args(args):
                                      )
 
 
-    parser.add_argument('--file', '-f', type=str, nargs=1,
-                        help='''file to write statistics on when picks were sent/recvd to''')
-    parser.add_argument('--id', type=str, nargs=1, default="seismic",
+    parser.add_argument('--file', '-f', type=str, default="output_events_rcvd",
+                        help='''file to write statistics on when picks were sent/recvd to
+                        (Note that it appends a '_' and the id to this string)''')
+    parser.add_argument('--id', type=str, default=None,
                         help='''unique identifier of this client (used for
-                         naming output files and including in event message)''')
+                         naming output files and including in event message;
+                         default=process ID)''')
 
-    parser.add_argument('--delay', '-d', type=float, nargs=1, default=1,
+    parser.add_argument('--delay', '-d', type=float, default=1,
                         help='''delay (in secs) before sending the event''')
-    parser.add_argument('--quit_time', '-q', type=float, nargs=1, default=10,
+    parser.add_argument('--quit_time', '-q', type=float, default=10,
                         help='''delay (in secs) before quitting and recording statistics''')
 
-    parser.add_argument('--port', '-p', type=int, nargs=1, default=9999,
+    parser.add_argument('--port', '-p', type=int, default=9999,
                         help='''UDP port number to which data should be sent or received''')
-    parser.add_argument('--address', '-a', type=str, nargs=1, default="127.0.0.1",
+    parser.add_argument('--address', '-a', type=str, default="127.0.0.1",
                         help='''IP address to which the data should be sent''')
 
     return parser.parse_args(args)
@@ -54,8 +57,12 @@ class SeismicClient(asyncore.dispatcher):
         # super(SeismicClient, self).__init__()
         asyncore.dispatcher.__init__(self)
 
+        # store configuration options and validate them
         self.config = config
-        self.my_ip = socket.gethostbyname(socket.gethostname())
+        if self.config.id is None:
+            self.config.id = str(os.getpid())
+
+        # self.my_ip = socket.gethostbyname(socket.gethostname())
 
         # Stores received UNIQUE events indexed by their 'id'
         # Includes the time they were received at
@@ -92,18 +99,24 @@ class SeismicClient(asyncore.dispatcher):
         # ENHANCE: handle packets too large to fit in this buffer
         try:
             event = json.loads(data)
+            print "received event %s" % event
+
             if event['id'] not in self.events_rcvd:
                 event['time_rcvd'] = time.time()
                 event['copies_rcvd'] = 1
-                self.events_rcvd['id'] = event
+                self.events_rcvd[event['id']] = event
             else:
-                self.events_rcvd['id']['copies_rcvd'] += 1
+                self.events_rcvd[event['id']]['copies_rcvd'] += 1
 
         except ValueError:
             print "Error parsing JSON from %s" % data
 
     def run(self):
-        asyncore.loop()
+        try:
+            asyncore.loop()
+        except:
+            # seems as though this just crashes sometimes when told to quit
+            return
 
     def finish(self):
         self.record_stats()
@@ -113,8 +126,8 @@ class SeismicClient(asyncore.dispatcher):
         """Records the received picks for consumption by another script
         that will analyze the resulting performance."""
 
-        #TODO: do we build the filename with the ID as well?
-        with open(self.config.file, "w") as f:
+        fname = "_".join([self.config.file, self.config.id])
+        with open(fname, "w") as f:
             f.write(json.dumps(self.events_rcvd))
 
 
