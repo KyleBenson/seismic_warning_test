@@ -29,7 +29,6 @@ def parse_args(args):
                                      #epilog='Text to display at the end of the help print',
                                      )
 
-
     parser.add_argument('--file', '-f', type=str, default="output_events_rcvd",
                         help='''file to write statistics on when picks were sent/recvd to
                         (Note that it appends a '_' and the id to this string)''')
@@ -88,6 +87,15 @@ class SeismicClient(asyncore.dispatcher):
 
         self.sendto(json.dumps(event), (self.config.address, self.config.port))
 
+    def process_event(self, event):
+        """Helper function for handle_read()"""
+        if event['id'] not in self.events_rcvd:
+            event['time_rcvd'] = time.time()
+            event['copies_rcvd'] = 1
+            self.events_rcvd[event['id']] = event
+        else:
+            self.events_rcvd[event['id']]['copies_rcvd'] += 1
+
     def handle_read(self):
         """
         Receive an event and record the time we received it.
@@ -101,12 +109,13 @@ class SeismicClient(asyncore.dispatcher):
             event = json.loads(data)
             print "received event %s" % event
 
-            if event['id'] not in self.events_rcvd:
-                event['time_rcvd'] = time.time()
-                event['copies_rcvd'] = 1
-                self.events_rcvd[event['id']] = event
+            # Aggregated events will have all the events in an array
+            if event['id'].startswith("aggregator"):
+                for e in event['events']:
+                    self.process_event(e)
+
             else:
-                self.events_rcvd[event['id']]['copies_rcvd'] += 1
+                self.process_event(event)
 
         except ValueError:
             print "Error parsing JSON from %s" % data
@@ -116,6 +125,7 @@ class SeismicClient(asyncore.dispatcher):
             asyncore.loop()
         except:
             # seems as though this just crashes sometimes when told to quit
+            print "Error in SeismicClient.run() can't recover..."
             return
 
     def finish(self):
