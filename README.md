@@ -3,8 +3,9 @@ Components for simulating a simplified seismic awareness scenario.  Clients repo
  and clients receive notifications of which devices picked for localized situational awareness.
 
 ASSUMPTIONS
--- Clients only send a single pick.  The server collects all picks during its buffering period in an array and sends them.
-
+-- Clients repeatedly send picks once the earthquake happens up to a specified number of copies.
+-- The aggregation server collects all picks during its buffering period in a dict and sends them in an array.
+-- The Aggregator keeps sending all of the picks received to date each buffering period.
 
 JSON schemas for events
 -- At start of single event's lifetime:
@@ -12,6 +13,7 @@ JSON schemas for events
 'time_sent' : 123333434.3314,
 -- When aggregated, the server puts them all in an array and adds some fields:
 {'id' : 'aggregator',
+'time_aggd' : 232423324.223,
 'events' : [{event}, {event}, ....]
 }
 -- Upon receiving an event, the client adds some additional info:

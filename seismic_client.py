@@ -6,6 +6,9 @@ a simple JSON format over UDP.'''
 # @author: Kyle Benson
 # (c) Kyle Benson 2016
 
+import logging as log
+log.basicConfig(format='%(levelname)s:%(message)s', level=log.DEBUG)
+
 import sys
 import argparse
 import time
@@ -13,6 +16,11 @@ import asyncore
 import socket
 import json
 import os
+from threading import Timer
+
+
+# Buffer size for receiving packets
+BUFF_SIZE = 4096
 
 
 def parse_args(args):
@@ -38,7 +46,10 @@ def parse_args(args):
                          default=process ID)''')
 
     parser.add_argument('--delay', '-d', type=float, default=1,
-                        help='''delay (in secs) before sending the event''')
+                        help='''delay (in secs) before sending the event
+                        (when the simulated earthquake occurs)''')
+    parser.add_argument('--retransmit', '-r', type=float, default=2,
+                        help='''delay (in secs) before resending the event for reliability''')
     parser.add_argument('--quit_time', '-q', type=float, default=10,
                         help='''delay (in secs) before quitting and recording statistics''')
 
@@ -70,8 +81,8 @@ class SeismicClient(asyncore.dispatcher):
         # TODO: need to record time we started the quake somehow?
 
         # queue seismic event reporting
-        from threading import Timer
-        Timer(self.config.delay, self.send_event).start()
+        self.next_timer = Timer(self.config.delay, self.send_event)
+        self.next_timer.start()
 
         # setup UDP network socket to listen for events on
         self.create_socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -86,6 +97,10 @@ class SeismicClient(asyncore.dispatcher):
         event['id'] = self.config.id
 
         self.sendto(json.dumps(event), (self.config.address, self.config.port))
+
+        # don't forget to schedule the next time we send aggregated events
+        self.next_timer = Timer(self.config.retransmit, self.send_event)
+        self.next_timer.start()
 
     def process_event(self, event):
         """Helper function for handle_read()"""
@@ -103,11 +118,11 @@ class SeismicClient(asyncore.dispatcher):
         we've received a duplicate.
         """
 
-        data = self.recv(4096)
+        data = self.recv(BUFF_SIZE)
         # ENHANCE: handle packets too large to fit in this buffer
         try:
             event = json.loads(data)
-            print "received event %s" % event
+            log.info("received event %s" % event)
 
             # Aggregated events will have all the events in an array
             if event['id'].startswith("aggregator"):
@@ -118,17 +133,18 @@ class SeismicClient(asyncore.dispatcher):
                 self.process_event(event)
 
         except ValueError:
-            print "Error parsing JSON from %s" % data
+            log.error("Error parsing JSON from %s" % data)
 
     def run(self):
         try:
             asyncore.loop()
         except:
             # seems as though this just crashes sometimes when told to quit
-            print "Error in SeismicClient.run() can't recover..."
+            log.error("Error in SeismicClient.run() can't recover...")
             return
 
     def finish(self):
+        self.next_timer.cancel()
         self.record_stats()
         self.close()
 

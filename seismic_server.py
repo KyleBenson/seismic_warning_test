@@ -8,6 +8,9 @@ then forwards the combined data to interested client devices.'''
 # @author: Kyle Benson
 # (c) Kyle Benson 2016
 
+import logging as log
+log.basicConfig(format='%(levelname)s:%(message)s', level=log.DEBUG)
+
 import sys
 import argparse
 import time
@@ -15,6 +18,10 @@ import asyncore
 import socket
 import json
 from threading import Timer
+
+
+# Buffer size for receiving packets
+BUFF_SIZE = 4096
 
 
 def parse_args(args):
@@ -54,10 +61,11 @@ class SeismicServer(asyncore.dispatcher):
         self.config = config
 
         # Stores received events indexed by their 'id'
-        self.events_rcvd = []
+        self.events_rcvd = dict()
 
         # queue seismic event aggregation and forwarding
-        Timer(self.config.delay, self.send_events).start()
+        # need to store references to cancel them when finish() is called
+        self.next_timer = Timer(self.config.delay, self.send_events).start()
 
         # setup UDP network socket to listen for events on
         self.create_socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -66,19 +74,21 @@ class SeismicServer(asyncore.dispatcher):
         # we assume that the quit_time is far enough in the future that
         # no interesting sensor data will arrive around then, hence not
         # worrying about flushing the buffer
-        Timer(self.config.quit_time, self.close).start()
+        Timer(self.config.quit_time, self.finish).start()
 
     def send_events(self):
         if len(self.events_rcvd) > 0:
             agg_events = dict()
-            agg_events['events'] = self.events_rcvd
+            # aggregated events are expected as an array
+            agg_events['events'] = [v for v in self.events_rcvd.values()]
             agg_events['id'] = 'aggregator'
             # TODO: test and determine whether or not we need to lock the data structures
             self.sendto(json.dumps(agg_events), (self.config.address, self.config.port))
-            self.events_rcvd = []
+            log.info("Aggregated events sent")
 
         # don't forget to schedule the next time we send aggregated events
-        Timer(self.config.delay, self.send_events).start()
+        self.next_timer = Timer(self.config.delay, self.send_events)
+        self.next_timer.start()
 
     def handle_read(self):
         """
@@ -87,26 +97,33 @@ class SeismicServer(asyncore.dispatcher):
         we've received a duplicate.
         """
 
-        data = self.recv(4096)
+        data = self.recv(BUFF_SIZE)
         # ENHANCE: handle packets too large to fit in this buffer
         try:
             event = json.loads(data)
-            print "received event %s" % event
+            log.info("received event %s" % event)
 
             # Aggregate events together in an array
-            self.events_rcvd.append(event)
+            if event['id'] not in self.events_rcvd:
+                event['time_aggd'] = time.time()
+                self.events_rcvd[event['id']] = event
 
         except ValueError:
-            print "Error parsing JSON from %s" % data
+            log.error("Error parsing JSON from %s" % data)
+        except IndexError as e:
+            log.error("Malformed event dict: %s" % e)
 
     def run(self):
         try:
             asyncore.loop()
         except:
             # seems as though this just crashes sometimes when told to quit
-            print "Error in SeismicServer.run() can't recover..."
-            return
+            log.error("Error in SeismicServer.run() can't recover...")
 
+    def finish(self):
+        # need to cancel the next timer or the loop could keep going
+        self.next_timer.cancel()
+        self.close()
 
 if __name__ == '__main__':
     args = parse_args(sys.argv[1:])
