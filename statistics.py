@@ -100,6 +100,10 @@ class SeismicStatistics(object):
         # So then we could further reduce the contributed weights by the # subs in order
         # to get the total being 1.0 iff all subs eventually received all events.
 
+        # TODO: use these markers
+        # markers = 'x.*+do^s1_|'
+        # plot(..., marker=markers[i%len(markers)])
+
         for (group_name, group) in self.stats.items():
             latencies, nsensors = self.get_latencies(group)
             # adjust the weight as per above paragraph

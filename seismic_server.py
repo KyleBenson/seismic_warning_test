@@ -44,8 +44,10 @@ def parse_args(args):
     parser.add_argument('--quit_time', '-q', type=float, default=30,
                         help='''delay (in secs) before quitting''')
 
-    parser.add_argument('--port', '-p', type=int, default=9999,
-                        help='''UDP port number to which data should be sent or received''')
+    parser.add_argument('--recv_port', type=int, default=9999,
+                        help='''UDP port number from which data should be received''')
+    parser.add_argument('--send_port', type=int, default=9998,
+                        help='''UDP port number to which data should be sent''')
     parser.add_argument('--address', '-a', type=str, default="127.0.0.1",
                         help='''IP address to which the aggregated data should be sent''')
 
@@ -69,7 +71,7 @@ class SeismicServer(asyncore.dispatcher):
 
         # setup UDP network socket to listen for events on
         self.create_socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.bind(('', self.config.port))
+        self.bind(('', self.config.recv_port))
 
         # we assume that the quit_time is far enough in the future that
         # no interesting sensor data will arrive around then, hence not
@@ -83,7 +85,7 @@ class SeismicServer(asyncore.dispatcher):
             agg_events['events'] = [v for v in self.events_rcvd.values()]
             agg_events['id'] = 'aggregator'
             # TODO: test and determine whether or not we need to lock the data structures
-            self.sendto(json.dumps(agg_events), (self.config.address, self.config.port))
+            self.sendto(json.dumps(agg_events), (self.config.address, self.config.send_port))
             log.info("Aggregated events sent")
 
         # don't forget to schedule the next time we send aggregated events

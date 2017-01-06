@@ -37,6 +37,10 @@ def parse_args(args):
                                      #epilog='Text to display at the end of the help print',
                                      )
 
+
+    parser.add_argument('--listen', '-l', action="store_true",
+                        help='''client will act as a subscriber and listen for incoming messages
+                        as well as output statistics at the end.''')
     parser.add_argument('--file', '-f', type=str, default="output_events_rcvd",
                         help='''file to write statistics on when picks were sent/recvd to
                         (Note that it appends a '_' and the id to this string)''')
@@ -53,10 +57,12 @@ def parse_args(args):
     parser.add_argument('--quit_time', '-q', type=float, default=10,
                         help='''delay (in secs) before quitting and recording statistics''')
 
-    parser.add_argument('--port', '-p', type=int, default=9999,
-                        help='''UDP port number to which data should be sent or received''')
-    parser.add_argument('--address', '-a', type=str, default="127.0.0.1",
-                        help='''IP address to which the data should be sent''')
+    parser.add_argument('--recv_port', type=int, default=9998,
+                        help='''UDP port number from which data should be received''')
+    parser.add_argument('--send_port', type=int, default=9999,
+                        help='''UDP port number to which data should be sent''')
+    parser.add_argument('--address', '-a', type=str, default=None,
+                        help='''If specified, enables sending sensor data to the given IP address''')
 
     return parser.parse_args(args)
 
@@ -81,12 +87,13 @@ class SeismicClient(asyncore.dispatcher):
         # TODO: need to record time we started the quake somehow?
 
         # queue seismic event reporting
-        self.next_timer = Timer(self.config.delay, self.send_event)
-        self.next_timer.start()
+        if self.config.address is not None:
+            self.next_timer = Timer(self.config.delay, self.send_event)
+            self.next_timer.start()
 
-        # setup UDP network socket to listen for events on
+        # setup UDP network socket to listen for events on and send them via
         self.create_socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.bind(('', self.config.port))
+        self.bind(('', self.config.recv_port))
 
         # record statistics after experiment finishes then clean up
         Timer(self.config.quit_time, self.finish).start()
@@ -96,7 +103,7 @@ class SeismicClient(asyncore.dispatcher):
         event['time_sent'] = time.time()
         event['id'] = self.config.id
 
-        self.sendto(json.dumps(event), (self.config.address, self.config.port))
+        self.sendto(json.dumps(event), (self.config.address, self.config.send_port))
 
         # don't forget to schedule the next time we send aggregated events
         self.next_timer = Timer(self.config.retransmit, self.send_event)
@@ -117,6 +124,9 @@ class SeismicClient(asyncore.dispatcher):
         If it's already been received, we simply record the fact that
         we've received a duplicate.
         """
+
+        if not self.config.listen:
+            return
 
         data = self.recv(BUFF_SIZE)
         # ENHANCE: handle packets too large to fit in this buffer
@@ -144,8 +154,14 @@ class SeismicClient(asyncore.dispatcher):
             return
 
     def finish(self):
-        self.next_timer.cancel()
-        self.record_stats()
+        try:
+            self.next_timer.cancel()
+        except AttributeError:
+            # This just means we don't send data
+            pass
+
+        if self.config.listen:
+            self.record_stats()
         self.close()
 
     def record_stats(self):
