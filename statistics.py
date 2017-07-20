@@ -92,6 +92,8 @@ class SeismicStatistics(object):
         '''Plots the CDF of the number of seismic events
         received at interested clients. Averaged over all subscribers.'''
 
+        # TODO: is this assuming that all sensors are also subscribers????
+
         # Can't just normalize because some experiments may have overall
         # better performance than others (or even different # sensors).
         # Instead, we estimate the total # sensors by counting all unique occurrences,
