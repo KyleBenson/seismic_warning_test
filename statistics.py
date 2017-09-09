@@ -56,6 +56,7 @@ class SeismicStatistics(object):
 
     def parse_all(self):
         for dirname in self.config.dirs:
+            # TODO: make parse_dir() return its results and store them here instead of in that func
             self.parse_dir(dirname)
 
     def parse_dir(self, dirname):

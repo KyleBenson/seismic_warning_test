@@ -1,8 +1,16 @@
 # seismic_warning_test
 Components for simulating a simplified seismic awareness scenario.  Clients report "picks", a server aggregates them,
  and clients receive notifications of which devices picked for localized situational awareness.
+ 
+## Getting started
 
-USAGE
+### Setting up RIDE
+
+You'll need to enable access to the RIDE Python package.  I do this by simply putting a symbolic link in this directory that points to the package.  If your PYTHONPATH includes '.', this should allow the modules to `import ride`.
+
+
+## Using the seismic_alert SCALE modules
+
 Run the clients all at the same time configured to send their data to a particular location.  This could be a multicast
 address or it could be the server.  If the server, it will aggregate data and then send it to its specified IP address.
 Recommended that you set the destination of this aggregated data to be a multicast address or else use
