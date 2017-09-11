@@ -4,7 +4,7 @@
 import logging
 log = logging.getLogger(__name__)
 
-from scale_client.networks.util import coap_response_success, coap_code_to_name
+from scale_client.networks.util import coap_response_success, coap_code_to_name, CoapCodes
 from scale_client.networks.coap_client import CoapClient
 from scale_client.networks.coap_server import CoapServer
 
@@ -115,10 +115,14 @@ class SeismicAlertSubscriber(Application):
             pass
 
         client = CoapClient(server_hostname=remote_broker)
-        # TODO: how to ensure this will go through?  repeat it? esp. if remote server hasn't started yet...
         response = client.post(path=path, payload=topic)
         if not coap_response_success(response):
-            log.error("failed to send subscription request due to Coap error: %s" % coap_code_to_name(response.code))
-            # TODO: try again?
+            if response.code == CoapCodes.METHOD_NOT_ALLOWED:
+                # XXX: for our experiments, try again as the server likely just didn't open the subscription API yet
+                time_between_subscription_attempts = 10
+                log.debug("server responded to subscription request with METHOD_NOT_ALLOWED: retrying in %d seconds..." % time_between_subscription_attempts)
+                self.timed_call(time_between_subscription_attempts, self.__class__.remote_subscribe, False, SEISMIC_ALERT_TOPIC, self.remote_broker)
+            else:
+                log.error("failed to send subscription request due to Coap error: %s" % coap_code_to_name(response.code))
 
         client.close()
