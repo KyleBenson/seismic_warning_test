@@ -36,7 +36,7 @@ class RideDEventSink(ThreadedEventSink):
                  # incoming packets.  This ignores other potential packets from those hosts, but this will have to do
                  # for now since running such a separated service would require more systems programming than this...
                  subscriptions=(SEISMIC_PICK_TOPIC,),
-                 maintenance_interval=2,
+                 maintenance_interval=10,
                  multicast=True, port=DEFAULT_COAP_PORT, topics_to_sink=(SEISMIC_ALERT_TOPIC,), **kwargs):
         """
         See also the parameters for RideD constructor!
@@ -183,6 +183,8 @@ class RideDEventSink(ThreadedEventSink):
         :return:
         """
 
+        # TODO: record results to output later?
+
         # XXX: when client closes the last response is a NoneType
         if response is None:
             return
@@ -208,8 +210,13 @@ class RideDEventSink(ThreadedEventSink):
             if self.use_multicast:
                 # if we ever encounter this, replace it with some real error handling...
                 assert self.rided is not None, "woops!  Ride-D should be set up but it isn't..."
-                address = self.rided.get_best_multicast_address(topic)
-                self.__sendto(encoded_event, topic=topic, address=address)
+
+                try:
+                    address = self.rided.get_best_multicast_address(topic)
+                    self.__sendto(encoded_event, topic=topic, address=address)
+                except KeyError:
+                    log.error("currently-unhandled error likely caused by trying to MDMT-multicast"
+                              " an alert to an unregistered topic with no MDMTs!")
 
             # Configured as unicast, so send a message to each subscriber individually
             else:
@@ -324,3 +331,5 @@ class RideDEventSink(ThreadedEventSink):
         """Close any open network connections e.g. CoapClient"""
         self.coap_client.close()
         super(RideDEventSink, self).on_stop()
+
+        # TODO: log error when no subscribers ever connected?
