@@ -29,8 +29,6 @@ class RideDEventSink(ThreadedEventSink):
                  # TODO: sublcass RideD in order to avoid code repetition here for extracting parameters?
                  dpid, addresses, topology_mgr='onos', ntrees=2,
                  tree_choosing_heuristic='importance', tree_construction_algorithm=('red-blue',),
-                 # TODO: replace this with an API...
-                 publishers=None,
                  # XXX: rather than running a separate service that would intercept incoming publications matching the
                  # specified flow for use in the STT, we simply wait for seismic picks and use them as if they're
                  # incoming packets.  This ignores other potential packets from those hosts, but this will have to do
@@ -78,9 +76,6 @@ class RideDEventSink(ThreadedEventSink):
             self.rided = RideD(topology_mgr=topology_mgr, dpid=dpid, addresses=addresses, ntrees=ntrees,
                                tree_choosing_heuristic=tree_choosing_heuristic, tree_construction_algorithm=tree_construction_algorithm)
 
-        # TODO: remove this when we move it to RIDE-C or to an API...
-        self.publishers = publishers
-
         # Use a single client to connect with each server
         # COAPTHON-SPECIFIC: unclear that we'd be able to do this in all future versions...
         # NOTE: we specify a dummy server_hostname because we'll explicitly set it each time we use the client,
@@ -116,25 +111,7 @@ class RideDEventSink(ThreadedEventSink):
             # TODO: background instead of periodic?
             self.timed_call(self.maintenance_interval, self.__class__.__maintain_topology, repeat=True)
 
-            #### set static routes for data Collection (ride-c)
-            # TODO: change the paths we set based on new combined ride-c/d experiments???
-            # TODO: move this to RideD?  Or RideC?
-            assert self.publishers is not None
-            log.info("setting static routes for publishers")
-            # HACK: need to populate with pubs/subs so we just do this manually rather
-            # than rely on a call to some REST API server/data exchange agent.
-            for pub in self.publishers:
-                # HACK: we get the shortest path (as per networkx) and set that as a static route
-                # to prevent the controller from changing the path later since we don't dynamically
-                # update the routes currently.
-                try:
-                    route = self.rided.topology_manager.get_path(pub, self.rided.dpid)
-                    flow_rules = self.rided.topology_manager.build_flow_rules_from_path(route)
-                    for r in flow_rules:
-                        self.rided.topology_manager.install_flow_rule(r)
-                    self.rided.set_publisher_route(pub, route)
-                except BaseException as e:
-                    log.warning("Route between publisher %s and server %s not found: skipping...\nError: %s" % (pub, self.rided.dpid, e))
+            # TODO: need to set_publisher_route
 
                     # TODO: should we bring this back in?  and does this only raise KeyError when NO subs reachable?  or if any unknown?
             #     # BUGFIX: if all subscribers are unreachable in the topology due to failure updates
@@ -153,7 +130,6 @@ class RideDEventSink(ThreadedEventSink):
         """
         Sends msg to the specified address using CoAP.  topic is used to define the path of the CoAP
         resource we PUT the msg in.
-        NOTE: this is a synchronous operation and waits for a response if not in multicast mode
         :param msg:
         :param topic:
         :param address:
