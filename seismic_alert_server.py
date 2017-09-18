@@ -1,6 +1,6 @@
 # @author: Kyle Benson
 # (c) Kyle Benson 2017
-
+import json
 import logging
 log = logging.getLogger(__name__)
 
@@ -23,6 +23,7 @@ class SeismicAlertServer(VirtualSensor):
     """
 
     def __init__(self, broker, sample_interval=2, event_type=SEISMIC_ALERT_TOPIC,
+                 output_events_file="output_events_rcvd",
                  subscriptions=(SEISMIC_PICK_TOPIC,), **kwargs):
         super(SeismicAlertServer, self).__init__(broker, event_type=event_type,
                                                  sample_interval=sample_interval, subscriptions=subscriptions, **kwargs)
@@ -36,6 +37,10 @@ class SeismicAlertServer(VirtualSensor):
         # Need to know when a CoapServer is running so we can open an endpoint for receiving seismic events.
         ev = CoapServer.CoapServerRunning(None)
         self.subscribe(ev, callback=self.__class__.__on_coap_ready)
+
+        # Store all events received in their original form to output to file for audit/testing purposes
+        self.output_file = output_events_file
+        self.__output_events = []
 
     def __on_coap_ready(self, server):
         """
@@ -66,10 +71,13 @@ class SeismicAlertServer(VirtualSensor):
             ev = self.events_to_process.get()
             log.debug("processing event %s" % ev)
             ev_id = get_event_source_id(ev)
-            # Skip over any null(or 0)-payload events
-            # TODO: maybe we shouldn't be skipping over ones we've already processed?  nothing to do with them currently though...
-            if ev_id not in self.events_rcvd and ev.data:
-                self.events_rcvd[ev_id] = ev
+            # Skip over any null-payload events entirely, store all others for outputting to file, and otherwise only
+            # keep events with new IDs not seen before for the aggregation mechanism.
+            if ev.data is not None:
+                # TODO: maybe we shouldn't be skipping over ones we've already processed?  nothing to do with them currently though...
+                if ev_id not in self.events_rcvd:
+                    self.events_rcvd[ev_id] = ev
+                self.__output_events.append(ev)
 
         # Then aggregate them and return the result for publication
         # ENHANCE: cache this and add new arrivals to it for better efficiency?
@@ -90,3 +98,11 @@ class SeismicAlertServer(VirtualSensor):
 
     def policy_check(self, event):
         return event is not None and event.data is not None
+
+    def on_stop(self):
+        """Records the received picks for consumption by another script
+        that will analyze the resulting performance."""
+        super(SeismicAlertServer, self).on_stop()
+
+        with open(self.output_file, "w") as f:
+            f.write(json.dumps([e.to_map() for e in self.__output_events]))
