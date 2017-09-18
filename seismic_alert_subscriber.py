@@ -8,14 +8,14 @@ from scale_client.networks.util import coap_response_success, coap_code_to_name,
 from scale_client.networks.coap_client import CoapClient
 from scale_client.networks.coap_server import CoapServer
 
-from scale_client.core.application import Application
+from scale_client.core.threaded_application import ThreadedApplication
 from seismic_alert_common import *
 
 import json
 import time
 
 
-class SeismicAlertSubscriber(Application):
+class SeismicAlertSubscriber(ThreadedApplication):
     """
     Testing application that receives 'seismic_alert' SensedEvents, which are multiple 'picks' aggregated together.
     It records when these alerts are received, how many duplicates arrive, and writes out these statistics on_stop()
@@ -46,6 +46,8 @@ class SeismicAlertSubscriber(Application):
         # open an endpoint on the server for receiving alert publications.
         ev = CoapServer.CoapServerRunning(None)
         self.subscribe(ev, callback=self.__class__.__on_coap_ready)
+
+        self.client = None
 
     def on_event(self, event, topic):
         """
@@ -79,6 +81,9 @@ class SeismicAlertSubscriber(Application):
         that will analyze the resulting performance."""
         super(SeismicAlertSubscriber, self).on_stop()
 
+        if self.client is not None:
+            self.client.close()
+
         with open(self.output_file, "w") as f:
             f.write(json.dumps(self.events_rcvd))
 
@@ -89,19 +94,20 @@ class SeismicAlertSubscriber(Application):
         for receiving the alerts.
         :return:
         """
-        # TODO: store server name and check we get the right one?
+        # ENHANCE: store server name and check we get the right one?
         # ENHANCE: maybe this is a common pattern for scale modules that use coap resources?  really it's a remote_coap_subscribe(topic, cb=None)???  maybe this belongs in a RemotePubSubManager class to handle all these things...
         event = self.make_event(event_type=SEISMIC_ALERT_TOPIC, data=None)
-        # TODO: not hard-code this
+        # ENHANCE: not hard-code this
         path = '/events/%s' % SEISMIC_ALERT_TOPIC
         # NOTE: no one remote should POST only PUT; delete could recall/cancel an alert but we don't handle that...
         server.store_event(event, path, disable_post=True, disable_delete=True)
 
-        self.timed_call(3, self.__class__.remote_subscribe, False, SEISMIC_ALERT_TOPIC, self.remote_broker)
-        # self.remote_subscribe(SEISMIC_ALERT_TOPIC, remote_broker=self.remote_broker)
+        # This needs to run as a separate thread because we may need to re-try the subscription request, but we
+        # can't just do async mode as failure to deliver message/receive response will not invoke our callback!
+        self.run_in_background(self.remote_subscribe, SEISMIC_ALERT_TOPIC, self.remote_broker)
 
-    # TODO: not hard-code subscriptions path
-    def remote_subscribe(self, topic, remote_broker, path=SUBSCRIPTION_API_PATH):
+    # ENHANCE: not hard-code subscriptions path
+    def remote_subscribe(self, topic, remote_broker, path=SUBSCRIPTION_API_PATH, tries_remaining=3):
         """
         Register subscription with remote_broker by sending a CoAP request to the specified path.
         :param path: string representing path part of subscription API URL; it should include a '%s' to be filled in with the topic
@@ -114,15 +120,22 @@ class SeismicAlertSubscriber(Application):
         except TypeError:
             pass
 
-        client = CoapClient(server_hostname=remote_broker)
-        response = client.post(path=path, payload=topic)
+        self.client = CoapClient(server_hostname=remote_broker)
+        response = self.client.post(path=path, payload=topic)
         if not coap_response_success(response):
             if response.code == CoapCodes.METHOD_NOT_ALLOWED:
                 # XXX: for our experiments, try again as the server likely just didn't open the subscription API yet
                 time_between_subscription_attempts = 10
-                log.debug("server responded to subscription request with METHOD_NOT_ALLOWED: retrying in %d seconds..." % time_between_subscription_attempts)
-                self.timed_call(time_between_subscription_attempts, self.__class__.remote_subscribe, False, SEISMIC_ALERT_TOPIC, self.remote_broker)
+                if tries_remaining > 0:
+                    log.debug("server responded to subscription request with METHOD_NOT_ALLOWED: retrying in %d seconds..." % time_between_subscription_attempts)
+                    time.sleep(time_between_subscription_attempts)
+                    self.remote_subscribe(SEISMIC_ALERT_TOPIC, self.remote_broker, path=path, tries_remaining=tries_remaining-1)
+                else:
+                    log.warning("GIVING UP on remote_subscription after multiple attempts that all returned METHOD_NOT_ALLOWED!")
             else:
                 log.error("failed to send subscription request due to Coap error: %s" % coap_code_to_name(response.code))
+        else:
+            log.debug("successfully subscribed to topic %s via remote_broker %s" % (topic, remote_broker))
 
-        client.close()
+        self.client.close()
+        self.client = None
