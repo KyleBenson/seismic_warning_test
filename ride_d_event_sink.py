@@ -27,7 +27,7 @@ class RideDEventSink(ThreadedEventSink):
     def __init__(self, broker,
                  # RideD parameters
                  # TODO: sublcass RideD in order to avoid code repetition here for extracting parameters?
-                 dpid, addresses, topology_mgr='onos', ntrees=2,
+                 dpid, addresses=None, topology_mgr='onos', ntrees=2,
                  tree_choosing_heuristic='importance', tree_construction_algorithm=('red-blue',),
                  # XXX: rather than running a separate service that would intercept incoming publications matching the
                  # specified flow for use in the STT, we simply wait for seismic picks and use them as if they're
@@ -70,6 +70,10 @@ class RideDEventSink(ThreadedEventSink):
 
         # Store parameters for RideD resilient multicast middleware; we'll actually build it later since it takes a while...
         self.use_multicast = multicast
+
+        if self.use_multicast and addresses is None:
+            raise NotImplementedError("you must specify the multicast 'addresses' parameter if multicast is enabled!")
+
         if not self.use_multicast:
             self.rided = None
         elif not BUILD_RIDED_IN_INIT:
@@ -83,7 +87,10 @@ class RideDEventSink(ThreadedEventSink):
         # COAPTHON-SPECIFIC: unclear that we'd be able to do this in all future versions...
         # NOTE: we specify a dummy server_hostname because we'll explicitly set it each time we use the client,
         # but it has to be a valid one to avoid causing an error...
-        self.coap_client = CoapClient(server_hostname=addresses[0], server_port=self.port, confirmable_messages=not self.use_multicast)
+        srv_ip = '10.0.0.1'
+        if addresses:
+            srv_ip = addresses[0]
+        self.coap_client = CoapClient(server_hostname=srv_ip, server_port=self.port, confirmable_messages=not self.use_multicast)
 
         # Use thread locks to prevent simultaneous write access to data structures due to e.g.
         # handling multiple simultaneous subscription registrations.
