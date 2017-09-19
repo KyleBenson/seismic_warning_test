@@ -33,7 +33,10 @@ class RideDEventSink(ThreadedEventSink):
                  # specified flow for use in the STT, we simply wait for seismic picks and use them as if they're
                  # incoming packets.  This ignores other potential packets from those hosts, but this will have to do
                  # for now since running such a separated service would require more systems programming than this...
-                 subscriptions=(SEISMIC_PICK_TOPIC,),
+                 subscriptions=(SEISMIC_PICK_TOPIC,
+                                # RideD gathers the publisher routes from RideC via events when they change
+                                PUBLISHER_ROUTE_TOPIC,
+                                ),
                  maintenance_interval=10,
                  multicast=True, port=DEFAULT_COAP_PORT, topics_to_sink=(SEISMIC_ALERT_TOPIC,), **kwargs):
         """
@@ -111,19 +114,6 @@ class RideDEventSink(ThreadedEventSink):
             # TODO: background instead of periodic?
             self.timed_call(self.maintenance_interval, self.__class__.__maintain_topology, repeat=True)
 
-            # TODO: need to set_publisher_route
-
-                    # TODO: should we bring this back in?  and does this only raise KeyError when NO subs reachable?  or if any unknown?
-            #     # BUGFIX: if all subscribers are unreachable in the topology due to failure updates
-            #     # propagating to the controller, we won't have registered any subs for the topic.
-            #     try:
-            #         self.rided.get_subscribers_for_topic(SEISMIC_ALERT_TOPIC)
-            #         mdmts = self.rided.build_mdmts()[SEISMIC_ALERT_TOPIC]
-            #         self.rided.install_mdmts(mdmts)
-            #     except KeyError:
-            #         log.error("No subscribers reachable by server!  Aborting...")
-            #         exit(self.EXIT_CODE_NO_SUBSCRIBERS)
-
         super(RideDEventSink, self).on_start()
 
     def __sendto(self, msg, topic, address, port=None):
@@ -189,6 +179,7 @@ class RideDEventSink(ThreadedEventSink):
 
                 try:
                     address = self.rided.get_best_multicast_address(topic)
+                    log.debug("using best available MDMT %s" % address)
                     self.__sendto(encoded_event, topic=topic, address=address)
                 except KeyError:
                     log.error("currently-unhandled error likely caused by trying to MDMT-multicast"
@@ -207,6 +198,7 @@ class RideDEventSink(ThreadedEventSink):
 
     def on_event(self, event, topic):
         """
+        We receive sensor-publisher route updates via events from RideC.
         HACK: any seismic picks we receive are treated as incoming publications for the purposes of updating the
         STT.  This clearly does not belong in a finalized version of the RideD middleware, which would instead
         intercept actual packets matching a particular flow and use them to update the STT.
@@ -216,15 +208,25 @@ class RideDEventSink(ThreadedEventSink):
         :return:
         """
 
-        assert topic == SEISMIC_PICK_TOPIC, "received non-seismic event we didn't subscribe to! topic=%s" % topic
+        if topic == SEISMIC_PICK_TOPIC:
 
-        if self.rided and not event.is_local:
-            # Find the publishing host's IP address and use that to notify RideD
-            publisher = event.source
-            publisher = get_hostname_from_path(publisher)
-            assert publisher is not None, "error processing publication with no source hostname: %s" % event.source
-            # TODO: may need to wrap this with mutex
-            self.rided.notify_publication(publisher, id_type='ip')
+            if self.rided and not event.is_local:
+                # Find the publishing host's IP address and use that to notify RideD
+                publisher = event.source
+                publisher = get_hostname_from_path(publisher)
+                assert publisher is not None, "error processing publication with no source hostname: %s" % event.source
+                # TODO: may need to wrap this with mutex
+                self.rided.notify_publication(publisher, id_type='ip')
+
+        elif topic == PUBLISHER_ROUTE_TOPIC:
+
+            if self.rided:
+                for host, route in event.data.items():
+                    log.debug("setting publisher route from event: host(%s) --> %s" % (host, route))
+                    self.rided.set_publisher_route(host, route)
+
+        else:
+            assert False, "received non-seismic event we didn't subscribe to! topic=%s" % topic
 
     def process_subscription(self, topic, host):
         """
