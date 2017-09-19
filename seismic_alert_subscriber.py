@@ -22,10 +22,10 @@ class SeismicAlertSubscriber(ThreadedApplication):
     """
 
     # TODO: should we really be locally subscribing to anything here?
-    def __init__(self, broker, remote_broker=None, output_file="output_events_rcvd", subscriptions=(SEISMIC_ALERT_TOPIC,), **kwargs):
+    def __init__(self, broker, remote_brokers=None, output_file="output_events_rcvd", subscriptions=(SEISMIC_ALERT_TOPIC,), **kwargs):
         """
         :param broker:
-        :param remote_broker: address/hostname of remote broker we'll subscribe with
+        :param remote_broker: addresses/hostnames of remote brokers we'll subscribe with
         :param output_file:
         :param subscriptions:
         :param kwargs:
@@ -38,9 +38,9 @@ class SeismicAlertSubscriber(ThreadedApplication):
 
         self.output_file = output_file
 
-        self.remote_broker = remote_broker
-        if remote_broker is None:
-            raise ValueError("remote_broker hostname/address must be specified for subscribing to work properly!")
+        self.remote_brokers = remote_brokers
+        if remote_brokers is None:
+            raise ValueError("remote_brokers hostname/address must be specified for subscribing to work properly!")
 
         # Need to know when a CoapServer is running so we can properly subscribe to the remote and
         # open an endpoint on the server for receiving alert publications.
@@ -104,7 +104,8 @@ class SeismicAlertSubscriber(ThreadedApplication):
 
         # This needs to run as a separate thread because we may need to re-try the subscription request, but we
         # can't just do async mode as failure to deliver message/receive response will not invoke our callback!
-        self.run_in_background(self.remote_subscribe, SEISMIC_ALERT_TOPIC, self.remote_broker)
+        for remote_broker in self.remote_brokers:
+            self.run_in_background(self.remote_subscribe, SEISMIC_ALERT_TOPIC, remote_broker)
 
     # ENHANCE: not hard-code subscriptions path
     def remote_subscribe(self, topic, remote_broker, path=SUBSCRIPTION_API_PATH, tries_remaining=3):
@@ -129,7 +130,7 @@ class SeismicAlertSubscriber(ThreadedApplication):
                 if tries_remaining > 0:
                     log.debug("server responded to subscription request with METHOD_NOT_ALLOWED: retrying in %d seconds..." % time_between_subscription_attempts)
                     time.sleep(time_between_subscription_attempts)
-                    self.remote_subscribe(SEISMIC_ALERT_TOPIC, self.remote_broker, path=path, tries_remaining=tries_remaining-1)
+                    self.remote_subscribe(SEISMIC_ALERT_TOPIC, remote_broker, path=path, tries_remaining=tries_remaining-1)
                 else:
                     log.warning("GIVING UP on remote_subscription after multiple attempts that all returned METHOD_NOT_ALLOWED!")
             else:
