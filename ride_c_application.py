@@ -21,7 +21,7 @@ class RideCApplication(RideC, ThreadedApplication):
 
     def __init__(self, broker,
                  # RideC parameters
-                 # TODO: replace these with an API...
+                 # ENHANCE: replace these with an API...
                  publishers=tuple(), data_paths=tuple(),
                  subscriptions=(DATA_PATH_UPDATE_TOPIC,),
                  maintenance_interval=10, **kwargs):
@@ -29,6 +29,9 @@ class RideCApplication(RideC, ThreadedApplication):
         See also the parameters for RideC constructor!
 
         :param broker:
+        :param publishers: DPIDs of all publisher hosts for registering them (NOTE that this should move to an API!!)
+        :param data_paths: collection of 3-tuples representing the (data_path_id, gateway_dpid, cloud_server_dpid)
+        parameters used to register each DataPath
         :param maintenance_interval: seconds between running topology updates and reconstructing publisher routes
          if necessary, accounting for topology changes
         :param kwargs:
@@ -39,7 +42,7 @@ class RideCApplication(RideC, ThreadedApplication):
 
         self.maintenance_interval = maintenance_interval
 
-        # TODO: remove these when we move it to an API...
+        # ENHANCE: remove these when we move it to an API...
         self.publishers = publishers
 
         # ENHANCE: re-enable this when we migrate to an API...
@@ -53,13 +56,12 @@ class RideCApplication(RideC, ThreadedApplication):
         # Register Datapaths first so that when we register the publishers they'll be assigned a DataPath automatically
         for dp, gw, cloud in data_paths:
             self.register_data_path(dp, gw, cloud)
-        # TODO: we might be responsible for spinning up the pinger processes for these data_paths...
 
     def __maintain_topology(self):
         """Runs periodically to check for topology updates, reconstruct the MDMTs if necessary, and update flow
         rules to account for these topology changes or newly-joined/leaving subscribers."""
 
-        # TODO: may need to lock data structures during this so we don't e.g. establish a route that no longer exists
+        # THREADING: may need to lock data structures during this so we don't e.g. establish a route that no longer exists
         update_routes = self.update()
 
         route_update_event = self.make_event(data=update_routes, topic=PUBLISHER_ROUTE_TOPIC)
@@ -71,8 +73,6 @@ class RideCApplication(RideC, ThreadedApplication):
         """
         super(RideCApplication, self).on_start()
 
-        # TODO: start pingers
-
         # This will choose a DataPath for them and install its flow rules.
         # We also need to publish these updated DataPaths' routes.
         routes_assigned = dict()
@@ -83,6 +83,19 @@ class RideCApplication(RideC, ThreadedApplication):
 
         route_update_event = self.make_event(data=routes_assigned, topic=PUBLISHER_ROUTE_TOPIC)
         self.publish(route_update_event, topic=PUBLISHER_ROUTE_TOPIC)
+
+        # Start DataPath monitors for each registered DataPath
+        # NOTE: we do this after the publisher routes in case a DP-monitor alerts us to a down DP, which could get
+        # overwritten by the subsequent publisher route assignment
+        t = 50
+        for dp in self.data_paths:
+            # TODO: run actual probing code instead of this hacky test that pretends it's a DP-monitor detecting a down DP
+            DOWN = 0
+            self.timed_call(t, self.__class__.on_data_path_status_change, False, dp, DOWN)
+            t += 20
+            # TODO: implement and test this:
+            # self.run_in_background(dp_monitor_function, dp_id, source_port)
+            # TODO: also make sure they close properly after on_stop()!!
 
     def on_event(self, event, topic):
         """Whenever we receive a DataPath update event, pass its contents to RideC to update the status."""
@@ -124,9 +137,3 @@ class RideCApplication(RideC, ThreadedApplication):
     #
     #     # server.register_api(path, name="%s subscription registration" % SEISMIC_ALERT_TOPIC,
     #     #                     post_callback=__process_coap_subscription, allow_children=True)
-
-    # TODO: close pingers?
-    # def on_stop(self):
-    #     """Close any open network connections"""
-    #     self.coap_client.close()
-    #     super(RideCApplication, self).on_stop()
