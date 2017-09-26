@@ -3,6 +3,7 @@
 
 
 from ride.ride_c import RideC
+from ride.data_path_monitor import RideCDataPathMonitor
 
 from scale_client.core.threaded_application import ThreadedApplication
 from seismic_alert_common import DATA_PATH_UPDATE_TOPIC, PUBLISHER_ROUTE_TOPIC
@@ -22,7 +23,7 @@ class RideCApplication(RideC, ThreadedApplication):
     def __init__(self, broker,
                  # RideC parameters
                  # ENHANCE: replace these with an API...
-                 publishers=tuple(), data_paths=tuple(),
+                 publishers=tuple(), data_paths=tuple(), dst_port=9999,
                  subscriptions=(DATA_PATH_UPDATE_TOPIC,),
                  maintenance_interval=10, **kwargs):
         """
@@ -30,14 +31,16 @@ class RideCApplication(RideC, ThreadedApplication):
 
         :param broker:
         :param publishers: DPIDs of all publisher hosts for registering them (NOTE that this should move to an API!!)
-        :param data_paths: collection of 3-tuples representing the (data_path_id, gateway_dpid, cloud_server_dpid)
+        :param data_paths: collection of 4-tuples representing the (data_path_id, gateway_dpid, cloud_server_dpid, probe_src_port)
         parameters used to register each DataPath
+        :param dst_port: port of remote echo server that probes will be sent to
         :param maintenance_interval: seconds between running topology updates and reconstructing publisher routes
          if necessary, accounting for topology changes
         :param kwargs:
         """
         # XXX: need to specify broker as a kwarg so it doesn't get passed to RideC as a positional
         super(RideCApplication, self).__init__(broker=broker, subscriptions=subscriptions,
+                                               n_threads=len(data_paths),  # need a thread for each DataPathMonitor
                                                advertisements=[PUBLISHER_ROUTE_TOPIC], **kwargs)
 
         self.maintenance_interval = maintenance_interval
@@ -54,8 +57,13 @@ class RideCApplication(RideC, ThreadedApplication):
         # self.subscribe(ev, callback=self.__class__.__on_coap_ready)
 
         # Register Datapaths first so that when we register the publishers they'll be assigned a DataPath automatically
-        for dp, gw, cloud in data_paths:
+        self._data_path_monitors = []
+        for dp, gw, cloud, src_port in data_paths:
             self.register_data_path(dp, gw, cloud)
+            # these will be started later, but we can create the objects for now
+            dpm = RideCDataPathMonitor(data_path_id=dp, address=self.topology_manager.get_ip_address(cloud),
+                                       dst_port=dst_port, src_port=src_port, status_change_callback=self.on_data_path_status_change)
+            self._data_path_monitors.append(dpm)
 
     def __maintain_topology(self):
         """Runs periodically to check for topology updates, reconstruct the MDMTs if necessary, and update flow
@@ -87,15 +95,17 @@ class RideCApplication(RideC, ThreadedApplication):
         # Start DataPath monitors for each registered DataPath
         # NOTE: we do this after the publisher routes in case a DP-monitor alerts us to a down DP, which could get
         # overwritten by the subsequent publisher route assignment
-        t = 50
-        for dp in self.data_paths:
-            # TODO: run actual probing code instead of this hacky test that pretends it's a DP-monitor detecting a down DP
-            DOWN = 0
-            self.timed_call(t, self.__class__.on_data_path_status_change, False, dp, DOWN)
-            t += 20
-            # TODO: implement and test this:
-            # self.run_in_background(dp_monitor_function, dp_id, source_port)
-            # TODO: also make sure they close properly after on_stop()!!
+        for dpm in self._data_path_monitors:
+            assert isinstance(dpm, RideCDataPathMonitor)  # type hinting
+            self.run_in_background(dpm.run)
+            # TESTING: can enable this hacky test that pretends it's a DP-monitor detecting a down DP
+            # self.timed_call(t, self.__class__.on_data_path_status_change, False, dp, DATA_PATH_DOWN)
+
+    def on_stop(self):
+        """Close each running DataPathMonitor"""
+        for dpm in self._data_path_monitors:
+            dpm.finish()
+        super(RideCApplication, self).on_stop()
 
     def on_event(self, event, topic):
         """Whenever we receive a DataPath update event, pass its contents to RideC to update the status."""
