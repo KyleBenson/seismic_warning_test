@@ -67,10 +67,13 @@ class SeismicAlertServer(VirtualSensor):
 
         # Receive and process all the new events by storing the ones we haven't received
         # TODO: should we keep track of how many duplicates get aggregated?  the original seismic_server didn't...
+        # Furthermore, the only time we receive duplicates should be if an ACK is lost since each successive event
+        # published should have a different sequence #.
+
         while not self.events_to_process.empty():
             ev = self.events_to_process.get()
             log.debug("processing event %s" % ev)
-            ev_id = get_event_source_id(ev)
+            ev_id = get_event_id(ev)
             # Skip over any null-payload events entirely, store all others for outputting to file, and otherwise only
             # keep events with new IDs not seen before for the aggregation mechanism.
             if ev.data is not None:

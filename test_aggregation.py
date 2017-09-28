@@ -95,15 +95,12 @@ class TestAggregation(unittest.TestCase):
     def test_duplicate_aggregation(self):
         """Verifies that we properly aggregate duplicates by counting the # of occurrences but keep the original."""
 
-        # First collect a bunch of events, some of which share the same source.
+        # First collect a bunch of duplicated events for one unique 'seismic event'.  Some share the same source.
         n_events = 5
         n_sources = 3
-        events = []
-        for i in range(n_events):
-            for j in range(n_sources):
-                ev = self.pub.make_event_with_raw_data(i+1)
-                ev.source = "sensor%d" % j
-                events.append(ev)
+        events = self._generate_events(1, n_sources, n_duplicates=n_events)
+        # TODO: probably need to do this generation again, do events.extend(dup_events), and re-work these tests since
+        # new changes to our code will break these tests that assume only the source matters...
 
         # Now feed them to the server in order and get the aggregate a couple times along the way to verify
         # that aggregation is working properly, including the subscriber's duplicate counts.
@@ -131,43 +128,111 @@ class TestAggregation(unittest.TestCase):
         delta = 0.001
 
         create_time = time.time()
-        events = []
         # Gather up events, some of which are from the same source
-        for i in range(3):
-            ev = self.pub.make_event_with_raw_data(i + 1)
-            events.append(ev)
-            ev = self.pub.make_event_with_raw_data(2*i + 1)
-            ev.source = "sensor%d" % i
-            events.append(ev)
+        n_quakes = 3
+        n_pubs = 2
+        n_dups = 5
+        events = self._generate_events(n_quakes, n_pubs, n_duplicates=5)
 
+        # Simulate a delay from when the events are uploaded to server and when the server aggregates them.
         time.sleep(SLEEP_TIME)
-        aggd_time = time.time()
         for e in events:
             self.srv.on_event(e, e.topic)
+        aggd_time = time.time()
         agg_ev = self.srv.read()
 
+        # Simulate delay from reporting aggregate alert to when the subscriber receives it.
         time.sleep(SLEEP_TIME)
         rcv_time = time.time()
         self.sub.on_event(agg_ev, agg_ev.topic)
 
-        self.assertGreater(len(self.sub.events_rcvd), 1)
+        # Now we verify our expected results:
+        self.assertGreater(len(self.sub.events_rcvd), 1, "subscriber should have received more than 1 event!")
         for stats in self.sub.events_rcvd.values():
             self.assertAlmostEqual(stats['time_sent'], create_time, delta=delta)
             self.assertAlmostEqual(stats['time_rcvd'], rcv_time, delta=delta)
+            self.assertAlmostEqual(stats['time_aggd'], aggd_time, delta=delta)
         self.assertAlmostEqual(agg_ev.timestamp, aggd_time, delta=delta)
 
         # make more events, push through to sub, and verify it keeps the time FIRST received
-        ev = self.pub.make_event_with_raw_data(7)
-        self.srv.on_event(ev, ev.topic)
-        time.sleep(SLEEP_TIME)
-        ev = self.pub.make_event_with_raw_data(7)
-        self.srv.on_event(ev, ev.topic)
+        events = self._generate_events(n_quakes, n_pubs, n_dups)
+        for ev in events:
+            self.srv.on_event(ev, ev.topic)
         ev = self.srv.read()
         self.sub.on_event(ev, ev.topic)
         for stats in self.sub.events_rcvd.values():
             self.assertAlmostEqual(stats['time_sent'], create_time, delta=delta)
             self.assertAlmostEqual(stats['time_rcvd'], rcv_time, delta=delta)
+            self.assertAlmostEqual(stats['time_aggd'], aggd_time, delta=delta)
 
+    def test_multiple_events(self):
+        """Test that the aggregator and subscriber properly distinguish different seismic events based on the sequence
+        number in event.data"""
+
+        # Produce a bunch of events with some duplicates and verify that the expected number of unique ones is correct.
+        n_quakes = 3
+        n_pubs = 4
+        n_dups = 5
+        events = self._generate_events(n_quakes, n_pubs, n_dups)
+
+        # Now feed them to the server in order and get the aggregate a couple times along the way to verify
+        # that aggregation is working properly, including the subscriber's duplicate counts.
+        for i in range(n_dups):
+            for j in range(n_quakes):
+                for k in range(n_pubs):
+                    ev = events.pop(0)
+                    self.srv.on_event(ev, ev.topic)
+
+                # Verify server aggregation
+                agg = self.srv.read()
+                # after first iteration of outer loop, we won't be adding any new events!
+                n_expected_events = n_pubs * ((j+1) if i == 0 else n_quakes)
+                actual_n_events = len(agg.data)
+                self.assertEqual(actual_n_events, n_expected_events,
+                                 "should have %d events in this aggregate alert after quake #%d"
+                                 " but we have %d!" % (n_expected_events, j, actual_n_events))
+
+                # verify subscriber
+                self.sub.on_event(agg, agg.topic)
+                self.assertEqual(len(self.sub.events_rcvd), n_expected_events)
+
+                # ENHANCE: could validate #copies by e.g. extracting seq # and verifying it, but the most recent events
+                # will be only 1 copy whereas the first events will have i+1 copies.
+
+    def test_event_id(self):
+        event1_src1 = self.pub.make_event_with_raw_data(5)
+        event1_src2 = self.pub.make_event_with_raw_data(5)
+        event1_src2.source = "other_sensor"
+        event2_src1 = self.pub.make_event_with_raw_data(0)
+        event2_src2 = self.pub.make_event_with_raw_data(0)
+        event2_src2.source = "other_sensor"
+
+        self.assertEqual(get_event_id(event1_src2), 'other_sensor/5')
+        self.assertNotEqual(get_event_id(event1_src2), get_event_id(event1_src1))
+        self.assertNotEqual(get_event_id(event1_src2), get_event_id(event2_src2))
+        self.assertNotEqual(get_event_id(event2_src1), get_event_id(event2_src2))
+
+
+    # Helper functions used across multiple tests
+
+    def _generate_events(self, n_unique_events, n_sources, n_duplicates=1):
+        """
+        Generate the given number of events for each of the given number of sources.  Also generates a number of
+        duplicate events for the requested number.
+        """
+
+        # TODO: if we change the APIs and need a more portable method of generating duplicate events, could create
+        # multiple publisher instances and have each of them generate events, copying these events for each duplicate.
+
+        events = []
+        for k in range(n_duplicates):
+            for i in range(n_unique_events):
+                for j in range(n_sources):
+                    ev = self.pub.make_event_with_raw_data(i)
+                    ev.source = "sensor%d" % j
+                    events.append(ev)
+
+        return events
 
 if __name__ == '__main__':
     unittest.main()

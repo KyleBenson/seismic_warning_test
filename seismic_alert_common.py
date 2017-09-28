@@ -31,3 +31,13 @@ def get_event_source_id(ev):
         log.debug("Unable to extract hostname as unique ID for event source! Using original source instead: %s" % ev.source)
         return ev.source
     return hostname
+
+def get_event_id(ev):
+    """
+    Returns an ID uniquely identifying the specified event.  An event is considered unique when it represents a unique
+    detection by a physical sensor i.e. it comes from a different source node or has been marked as being a different
+    real-world event by the source node by having a different sequence number.
+    :type ev: scale_client.core.sensed_event.SensedEvent
+    """
+    eid = "%s/%s" % (get_event_source_id(ev), ev.data)
+    return eid
