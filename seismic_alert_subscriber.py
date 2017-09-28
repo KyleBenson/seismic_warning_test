@@ -69,6 +69,7 @@ class SeismicAlertSubscriber(ThreadedApplication):
                 if ev_id not in self.events_rcvd:
                     ev['time_rcvd'] = time.time()
                     ev['copies_rcvd'] = 1
+                    ev['agg_src'] = event.source
                     self.events_rcvd[ev_id] = ev
                 else:
                     self.events_rcvd[ev_id]['copies_rcvd'] += 1
