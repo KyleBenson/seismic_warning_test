@@ -220,6 +220,7 @@ class RideDEventSink(ThreadedEventSink):
             if self.rided and not event.is_local:
                 # Find the publishing host's IP address and use that to notify RideD
                 publisher = event.source
+                # ENHANCE: accept full address (e.g. ipv4_add, port) as publisher IDs just like RideC!
                 publisher = get_hostname_from_path(publisher)
                 assert publisher is not None, "error processing publication with no source hostname: %s" % event.source
                 # TODO: may need to wrap this with mutex

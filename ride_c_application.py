@@ -30,7 +30,8 @@ class RideCApplication(RideC, ThreadedApplication):
         See also the parameters for RideC constructor!
 
         :param broker:
-        :param publishers: DPIDs of all publisher hosts for registering them (NOTE that this should move to an API!!)
+        :param publishers: collection of tuples containing the parameters (ip_addr, src_port) needed for registering all
+         publisher hosts (NOTE that this will eventually move to an API!!)
         :param data_paths: collection of 4-tuples representing the (data_path_id, gateway_dpid, cloud_server_dpid, probe_src_port)
         parameters used to register each DataPath
         :param dst_port: port of remote echo server that probes will be sent to
@@ -70,9 +71,15 @@ class RideCApplication(RideC, ThreadedApplication):
         rules to account for these topology changes or newly-joined/leaving subscribers."""
 
         # THREADING: may need to lock data structures during this so we don't e.g. establish a route that no longer exists
-        update_routes = self.update()
+        updated_routes = self.update()
+        self.publish_route_updates(updated_routes)
 
-        route_update_event = self.make_event(data=update_routes, topic=PUBLISHER_ROUTE_TOPIC)
+    def publish_route_updates(self, updated_routes):
+        """Helper function to locally publish 'publisher_route_update' events, mainly for the benefit of RideD"""
+        # XXX: since RideD only accepts IP addresses, we need to extract that from the host addresses that may include ports
+        # ENHANCE: either move this conversion to RideD, or accept a complete host address in RideD
+        updated_routes = {self._get_host_ip_address(k): v for k,v in updated_routes.items()}
+        route_update_event = self.make_event(data=updated_routes, topic=PUBLISHER_ROUTE_TOPIC)
         self.publish(route_update_event, topic=PUBLISHER_ROUTE_TOPIC)
 
     def on_start(self):
@@ -85,12 +92,13 @@ class RideCApplication(RideC, ThreadedApplication):
         # We also need to publish these updated DataPaths' routes.
         routes_assigned = dict()
         for pub in self.publishers:
+            # XXX: pub format needs to be a tuple in order to be hashed into a dict
+            pub = tuple(pub)
             self.register_host(pub)
             route = self._host_routes[pub]
             routes_assigned[pub] = route
 
-        route_update_event = self.make_event(data=routes_assigned, topic=PUBLISHER_ROUTE_TOPIC)
-        self.publish(route_update_event, topic=PUBLISHER_ROUTE_TOPIC)
+        self.publish_route_updates(routes_assigned)
 
         # Start DataPath monitors for each registered DataPath
         # NOTE: we do this after the publisher routes in case a DP-monitor alerts us to a down DP, which could get
