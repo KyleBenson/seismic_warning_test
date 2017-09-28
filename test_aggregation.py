@@ -8,26 +8,20 @@ from seismic_alert_server import SeismicAlertServer
 from seismic_alert_subscriber import SeismicAlertSubscriber
 from seismic_alert_common import *
 
-from scale_client.sensors.dummy.heartbeat_sensor import HeartbeatSensor
+from scale_client.sensors.dummy.dummy_virtual_sensor import DummyVirtualSensor
 
 
 class TestAggregation(unittest.TestCase):
 
     def setUp(self):
         broker = Broker()
-        self.sub = SeismicAlertSubscriber(broker=broker)
-        self.pub = HeartbeatSensor(broker=broker, event_type=SEISMIC_PICK_TOPIC)
+        self.sub = SeismicAlertSubscriber(broker=broker, remote_brokers=['localhost'])
+        # Just like in actual tests, need to have events use a sequence # as the data to distinguish different quakes!
+        self.pub = DummyVirtualSensor(broker=broker, name='SeismicPublisher', event_type="seismic", dynamic_event_data=dict(seq=0))
         self.srv = SeismicAlertServer(broker=broker)
 
     def test_empty(self):
-        """Verify that a pick with an empty (or 0-value) payload is ignored."""
-        ev = self.pub.make_event_with_raw_data(0.0)
-        self.srv.on_event(ev, ev.topic)
-        self.assertFalse(self.srv.events_to_process.empty())
-        self.srv.read()
-        self.assertFalse(self.srv.events_rcvd, "server should have ignored 0-value payload event!")
-        self.assertTrue(self.srv.events_to_process.empty())
-
+        """Verify that a pick with an empty (null-value) payload is ignored, but NOT one with 0-value!."""
         # Test with payload being None
         ev = self.pub.make_event_with_raw_data(None)
         self.srv.on_event(ev, ev.topic)
@@ -36,10 +30,17 @@ class TestAggregation(unittest.TestCase):
 
         # do more copies
         for i in range(5):
-            ev = self.pub.make_event_with_raw_data(0)
+            ev = self.pub.make_event_with_raw_data(None)
             self.srv.on_event(ev, ev.topic)
         self.srv.read()
         self.assertFalse(self.srv.events_rcvd, "server should have ignored null-payload event!")
+
+        ev = self.pub.make_event_with_raw_data(0.0)
+        self.srv.on_event(ev, ev.topic)
+        self.assertFalse(self.srv.events_to_process.empty())
+        self.srv.read()
+        self.assertTrue(self.srv.events_rcvd, "server should not have ignored 0-value payload event!")
+        self.assertTrue(self.srv.events_to_process.empty())
 
     def test_simple_aggregation(self):
         """Verifies that the server will aggregate one event at a time, building up the collection of received events.

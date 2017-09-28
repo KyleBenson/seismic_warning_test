@@ -8,6 +8,9 @@ SUBSCRIPTION_API_PATH = '/subscriptions/'
 
 from scale_client.util.uri import parse_uri
 
+import logging
+log = logging.getLogger(__name__)
+
 def get_hostname_from_path(path):
     """
     :param path:
@@ -25,5 +28,6 @@ def get_hostname_from_path(path):
 def get_event_source_id(ev):
     hostname = get_hostname_from_path(ev.source)
     if hostname is None:
-        raise ValueError("unable to determine unique ID for event source %s" % ev.source)
+        log.debug("Unable to extract hostname as unique ID for event source! Using original source instead: %s" % ev.source)
+        return ev.source
     return hostname
