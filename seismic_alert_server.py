@@ -1,15 +1,16 @@
 # @author: Kyle Benson
 # (c) Kyle Benson 2017
 import json
-import logging
-log = logging.getLogger(__name__)
-
 import time
 from Queue import Queue
 
 from scale_client.networks.coap_server import CoapServer
 from scale_client.sensors.virtual_sensor import VirtualSensor
 from seismic_alert_common import *
+
+# Make sure this is after the seismic_alert_common import, which would otherwise override 'log'!
+import logging
+log = logging.getLogger(__name__)
 
 
 class SeismicAlertServer(VirtualSensor):

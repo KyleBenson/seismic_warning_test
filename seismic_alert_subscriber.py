@@ -1,15 +1,16 @@
 # @author: Kyle Benson
 # (c) Kyle Benson 2016
 
-import logging
-log = logging.getLogger(__name__)
-
 from scale_client.networks.util import coap_response_success, coap_code_to_name, CoapCodes
 from scale_client.networks.coap_client import CoapClient
 from scale_client.networks.coap_server import CoapServer
 
 from scale_client.core.threaded_application import ThreadedApplication
 from seismic_alert_common import *
+
+# Make sure this is after the seismic_alert_common import, which would otherwise override 'log'!
+import logging
+log = logging.getLogger(__name__)
 
 import json
 import time
