@@ -321,5 +321,6 @@ class RideDEventSink(ThreadedEventSink):
         # TODO: log error when no subscribers ever connected?
 
     def encode_event(self, event):
-        """Encodes the given event with several fields stripped out in order to save space in the CoAP packet."""
-        return event.to_json(exclude_fields=('schema', 'condition', 'misc', 'prio_value', 'prio_class', 'timestamp'))
+        """Encodes the given event with several fields stripped out and only the most recent event IDs in order to save
+        space in the single CoAP packet it will be sunk in."""
+        return compress_alert_one_coap_packet(event)

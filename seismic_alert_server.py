@@ -85,9 +85,7 @@ class SeismicAlertServer(VirtualSensor):
 
         # Then aggregate them and return the result for publication
         # ENHANCE: cache this and add new arrivals to it for better efficiency?
-        # NOTE: we only include the unique event IDs in order to squeeze as many aggregated events as possible into the
-        # Coap packet.  When analyzing results, we'll have to figure out the timestamps from the various output files...
-        agg_events = list(self.events_rcvd.keys())
+        agg_events = {ev_id: dict(time_sent=ev.timestamp, time_aggd=ev.metadata['time_aggd']) for ev_id, ev in self.events_rcvd.items()}
 
         return agg_events
 

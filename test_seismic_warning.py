@@ -4,6 +4,7 @@ import logging
 import time
 
 from scale_client.core.broker import Broker
+from scale_client.core.sensed_event import SensedEvent
 from seismic_alert_server import SeismicAlertServer
 from seismic_alert_subscriber import SeismicAlertSubscriber
 from seismic_alert_common import *
@@ -11,7 +12,7 @@ from seismic_alert_common import *
 from scale_client.sensors.dummy.dummy_virtual_sensor import DummyVirtualSensor
 
 
-class TestAggregation(unittest.TestCase):
+class TestSeismicWarning(unittest.TestCase):
 
     def setUp(self):
         broker = Broker()
@@ -128,7 +129,10 @@ class TestAggregation(unittest.TestCase):
         # Sleep to ensure we have different enough timestamps...
         SLEEP_TIME = 0.1
         # they should be within this delta of each other
-        delta = 0.001
+        # NOTE: we've had to increase this from 0.001, so you might find that on a different system the tests fail.  As
+        # long as they're within a reasonable delta of each other (could increase SLEEP_TIME too) this should be
+        # considered a successful test.
+        delta = 0.005
 
         create_time = time.time()
         # Gather up events, some of which are from the same source
@@ -215,25 +219,85 @@ class TestAggregation(unittest.TestCase):
         self.assertNotEqual(get_event_id(event1_src2), get_event_id(event2_src2))
         self.assertNotEqual(get_event_id(event2_src1), get_event_id(event2_src2))
 
+    def test_alert_compression(self, n_sensors=20, n_quakes=10, expect_one_packet=False):
+        """Tests the method for compressing the data in a seismic alert event so that it fits in a single CoAP packet.
+        Note that this test doesn't actually verify that the packet isn't fragmented on the wire, but rather relies on
+        the CoAP helper function to check if it's too big."""
+
+        # IDEA: create pick events, pass them to server, get its aggregated alert event, compress that, and then verify
+        # that it fits into a single CoAP packet and actually contains recent events
+
+        events = self._generate_events(n_quakes, n_sensors, event_type=SEISMIC_PICK_TOPIC, time_incr=1)
+        # NOTE: because of the varying event ID lengths and our attempt to quickly cut out some that are over capacity,
+        # we add some more events with longer name lengths to verify that part works.  You can enable logging and add
+        # print statements to the function to manually verify this, though automated tests with more than 2 different
+        # event ID lengths would be much better.  WARNING: this test wasn't catching a bug due to this fact!
+        big_event_id = 'big_huge_accelerometer_thing%d'
+        events.extend(self._generate_events(n_quakes, n_sensors / 4, event_type=SEISMIC_PICK_TOPIC, sensor_name=big_event_id))
+        for e in events:
+            self.srv.on_event(e, topic=e.topic)
+
+        alert = self.srv.read()
+        self.assertFalse(msg_fits_one_coap_packet(alert.to_json()), "alert msg already fits into one packet! add more pick events...")
+
+        comp_alert = compress_alert_one_coap_packet(alert)
+        self.assertTrue(msg_fits_one_coap_packet(comp_alert), "compressed alert data doesn't actually fit in one packet!")
+
+        # double-check the contained events are newer ones
+        decomp_alert = SensedEvent.from_json(comp_alert)
+        # print "alert data was:", alert.data, "\nBut now is:", decomp_alert.data
+        # print "seq #s after compression are:", [get_seq_from_event_id(eid) for eid in decomp_alert.data]
+        self.assertIsInstance(decomp_alert.data, list)  # make sure it isn't just a single event string...
+        self.assertTrue(any(get_seq_from_event_id(eid) == n_quakes - 1 for eid in decomp_alert.data))  # should keep newest
+
+        # Don't run these checks for the tests that verify it works ok with only a few events
+        if not expect_one_packet:
+            self.assertGreaterEqual(len(decomp_alert.data), 5)  # where all the events at??
+            self.assertTrue(all(get_seq_from_event_id(eid) > 0 for eid in decomp_alert.data))  # should throw out oldest
+            # check to make sure we're using most of the packet.  Note that we assume here nquakes < 1000
+            self.assertGreater(len(comp_alert), COAP_MAX_PAYLOAD_SIZE - (len(big_event_id) + 4))
+
+    def test_alert_compression2(self):
+        """Using the above test, verifies some edge conditions and provides opportunity to verify other behaviors."""
+
+        # Verify we don't cause errors when there's plenty of room in the packet
+        self.test_alert_compression(n_sensors=3, expect_one_packet=True)
+
+        # Verify we get no errors with only a single event
+        self.test_alert_compression(n_sensors=1, n_quakes=1, expect_one_packet=True)
+
+        # with logging enabled, run this to verify that we'll receive an error msg
+        # if we had too many new events (highest event ID seq #) to fit in one packet.
+        # logging.basicConfig(level=logging.DEBUG)
+        # self.test_alert_compression(n_sensors=100)
 
     # Helper functions used across multiple tests
 
-    def _generate_events(self, n_unique_events, n_sources, n_duplicates=1):
+    def _generate_events(self, n_unique_events, n_sources, n_duplicates=1,
+                         event_type=None, time_incr=None, sensor_name="sensor%d"):
         """
         Generate the given number of events for each of the given number of sources.  Also generates a number of
         duplicate events for the requested number.
+        :param event_type: if specified, sets the event's type/topic
+        :param time_incr: if specified, generates each successive packet (for different unique events / duplicates, but
+        not sources) with a timestamp that's time_incr seconds later
+        :param sensor_name: a string that will be formatted with the sequential source number (e.g. default='sensor%d')
+        and used as the events' source(s)
         """
 
         # TODO: if we change the APIs and need a more portable method of generating duplicate events, could create
         # multiple publisher instances and have each of them generate events, copying these events for each duplicate.
 
         events = []
+        timestamp = time.time() if time_incr is not None else None
         for k in range(n_duplicates):
             for i in range(n_unique_events):
                 for j in range(n_sources):
-                    ev = self.pub.make_event_with_raw_data(i)
-                    ev.source = "sensor%d" % j
+                    ev = self.pub.make_event(data=i, timestamp=timestamp, event_type=event_type, source=sensor_name % j)
                     events.append(ev)
+
+                if timestamp is not None:
+                    timestamp += time_incr
 
         return events
 
