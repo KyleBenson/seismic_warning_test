@@ -66,7 +66,12 @@ class SeismicAlertSubscriber(ThreadedApplication):
         log.debug("processing alert: %s" % event.data)
 
         try:
-            for ev_id in event.data:
+            # XXX: if the event_ids are compressed to binary, extract them
+            event_ids = event.data
+            if isinstance(event_ids, basestring):
+                event_ids = unpack_seismic_alert_data(event.data)
+
+            for ev_id in event_ids:
                 if ev_id not in self.events_rcvd:
                     ev = dict()
                     ev['time_rcvd'] = time.time()

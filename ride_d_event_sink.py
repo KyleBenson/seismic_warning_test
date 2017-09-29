@@ -319,3 +319,14 @@ class RideDEventSink(ThreadedEventSink):
         super(RideDEventSink, self).on_stop()
 
         # TODO: log error when no subscribers ever connected?
+
+    def encode_event(self, event):
+        """Encodes the given event by compressing the event IDs to a binary format in order to save space in the Coap
+        packet and fit more aggregated events in a single packet."""
+
+        # restore the event's data at the end
+        old_data = event.data
+        event.data = pack_seismic_alert_data(event.data)
+        ret = super(RideDEventSink, self).encode_event(event)
+        event.data = old_data
+        return ret

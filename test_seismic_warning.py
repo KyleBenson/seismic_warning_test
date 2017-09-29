@@ -11,7 +11,9 @@ from seismic_alert_common import *
 from scale_client.sensors.dummy.dummy_virtual_sensor import DummyVirtualSensor
 
 
-class TestAggregation(unittest.TestCase):
+class TestSeismicWarning(unittest.TestCase):
+    """Tests the various features of the seismic warning test code.  It's mostly for the purposes of ensuring the
+    event aggregation mechanisms work properly, but there's also some tests of various utility functions here."""
 
     def setUp(self):
         broker = Broker()
@@ -128,7 +130,7 @@ class TestAggregation(unittest.TestCase):
         # Sleep to ensure we have different enough timestamps...
         SLEEP_TIME = 0.1
         # they should be within this delta of each other
-        delta = 0.001
+        delta = 0.01
 
         create_time = time.time()
         # Gather up events, some of which are from the same source
@@ -202,6 +204,8 @@ class TestAggregation(unittest.TestCase):
                 # ENHANCE: could validate #copies by e.g. extracting seq # and verifying it, but the most recent events
                 # will be only 1 copy whereas the first events will have i+1 copies.
 
+    # Test utility functions
+
     def test_event_id(self):
         event1_src1 = self.pub.make_event_with_raw_data(5)
         event1_src2 = self.pub.make_event_with_raw_data(5)
@@ -215,6 +219,40 @@ class TestAggregation(unittest.TestCase):
         self.assertNotEqual(get_event_id(event1_src2), get_event_id(event2_src2))
         self.assertNotEqual(get_event_id(event2_src1), get_event_id(event2_src2))
 
+    def test_event_id_serialization(self):
+        """Test the ability to pack/unpack event IDs into/from a more compressed binary form in order to save space."""
+
+        # PLAN: just pack then unpack the events' IDs to ensure we can transfer them in a compressed format on the wire
+        events = self._generate_events(3, 3)
+
+        # to make sure they aren't all equivalent somehow, track which ones we've seen
+        ev_ids_seen = set()
+        for ev in events:
+            ev_id = get_event_id(ev)
+            comp_ev_id = pack_event_id(ev_id)
+            uncompressed_ev_id = unpack_event_id(comp_ev_id)
+
+            self.assertEqual(ev_id, uncompressed_ev_id)
+            self.assertEqual(len(comp_ev_id), PACKED_EVENT_ID_LEN)
+            self.assertNotIn(uncompressed_ev_id, ev_ids_seen)
+
+            ev_ids_seen.add(uncompressed_ev_id)
+
+        self.assertEqual(len(ev_ids_seen), 9)
+
+    def test_seismic_alert_serialization(self):
+        """Test the ability to pack/unpack the seismic alert data (list of event IDs) into/from a more compressed
+         binary form in order to save space."""
+
+        # PLAN: just pack then unpack the events' IDs to ensure we can transfer them in a compressed format on the wire
+        events = self._generate_events(3, 3)
+
+        # NOW, we need to make sure we can properly (de)compress the whole list of event IDs
+        ev_ids = [get_event_id(e) for e in events]
+        comp_ev_ids = pack_seismic_alert_data(ev_ids)
+        uncompressed_ev_ids = unpack_seismic_alert_data(comp_ev_ids)
+
+        self.assertEqual(ev_ids, uncompressed_ev_ids)
 
     # Helper functions used across multiple tests
 
@@ -232,7 +270,7 @@ class TestAggregation(unittest.TestCase):
             for i in range(n_unique_events):
                 for j in range(n_sources):
                     ev = self.pub.make_event_with_raw_data(i)
-                    ev.source = "sensor%d" % j
+                    ev.source = "coap://10.0.0.%d/sensors/DummySensor" % j
                     events.append(ev)
 
         return events
