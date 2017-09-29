@@ -122,6 +122,9 @@ class TestAggregation(unittest.TestCase):
         also ensure that the alert's time is the time it was aggregated.  Also check that the subscriber
         records the time FIRST received."""
 
+        # XXX NOTE: we changed the seismic scenario data model to only include the event ID in order to save space in
+        # the Coap packet; hence, a lot of these checks aren't done anymore since those fields aren't present.
+
         # Sleep to ensure we have different enough timestamps...
         SLEEP_TIME = 0.1
         # they should be within this delta of each other
@@ -149,9 +152,9 @@ class TestAggregation(unittest.TestCase):
         # Now we verify our expected results:
         self.assertGreater(len(self.sub.events_rcvd), 1, "subscriber should have received more than 1 event!")
         for stats in self.sub.events_rcvd.values():
-            self.assertAlmostEqual(stats['time_sent'], create_time, delta=delta)
+            # self.assertAlmostEqual(stats['time_sent'], create_time, delta=delta)
             self.assertAlmostEqual(stats['time_rcvd'], rcv_time, delta=delta)
-            self.assertAlmostEqual(stats['time_aggd'], aggd_time, delta=delta)
+            # self.assertAlmostEqual(stats['time_aggd'], aggd_time, delta=delta)
         self.assertAlmostEqual(agg_ev.timestamp, aggd_time, delta=delta)
 
         # make more events, push through to sub, and verify it keeps the time FIRST received
@@ -161,9 +164,9 @@ class TestAggregation(unittest.TestCase):
         ev = self.srv.read()
         self.sub.on_event(ev, ev.topic)
         for stats in self.sub.events_rcvd.values():
-            self.assertAlmostEqual(stats['time_sent'], create_time, delta=delta)
+            # self.assertAlmostEqual(stats['time_sent'], create_time, delta=delta)
             self.assertAlmostEqual(stats['time_rcvd'], rcv_time, delta=delta)
-            self.assertAlmostEqual(stats['time_aggd'], aggd_time, delta=delta)
+            # self.assertAlmostEqual(stats['time_aggd'], aggd_time, delta=delta)
 
     def test_multiple_events(self):
         """Test that the aggregator and subscriber properly distinguish different seismic events based on the sequence

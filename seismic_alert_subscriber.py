@@ -66,8 +66,9 @@ class SeismicAlertSubscriber(ThreadedApplication):
         log.debug("processing alert: %s" % event.data)
 
         try:
-            for ev_id, ev in event.data.items():
+            for ev_id in event.data:
                 if ev_id not in self.events_rcvd:
+                    ev = dict()
                     ev['time_rcvd'] = time.time()
                     ev['copies_rcvd'] = 1
                     ev['agg_src'] = event.source

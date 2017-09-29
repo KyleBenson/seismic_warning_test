@@ -146,7 +146,7 @@ class RideDEventSink(ThreadedEventSink):
         # Use async mode to send this message as otherwise sending a bunch of them can lead to a back log...
         self.coap_client.put(path=path, payload=msg, callback=self.__put_event_callback)
 
-        log.debug("RIDE-D message sent: topic=%s ; address=%s" % (topic, address))
+        log.debug("RIDE-D message sent: topic=%s ; address=%s ; payload_length=%d" % (topic, address, len(msg)))
 
     def __put_event_callback(self, response):
         """
