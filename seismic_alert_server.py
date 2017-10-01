@@ -109,4 +109,4 @@ class SeismicAlertServer(VirtualSensor):
         super(SeismicAlertServer, self).on_stop()
 
         with open(self.output_file, "w") as f:
-            f.write(json.dumps([e.to_map() for e in self.__output_events]))
+            f.write(json.dumps([e.to_map() for e in self.__output_events], indent=2))

@@ -88,7 +88,7 @@ class SeismicAlertSubscriber(ThreadedApplication):
             self.client.close()
 
         with open(self.output_file, "w") as f:
-            f.write(json.dumps(self.events_rcvd))
+            f.write(json.dumps(self.events_rcvd, indent=2))
 
     def __on_coap_ready(self, server):
         """
