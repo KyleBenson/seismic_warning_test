@@ -41,6 +41,7 @@ class RideDEventSink(ThreadedEventSink):
                  multicast=True, port=DEFAULT_COAP_PORT, topics_to_sink=(SEISMIC_ALERT_TOPIC,), **kwargs):
         """
         See also the parameters for RideD constructor!
+        :param ntrees: # MDMTs to build (passed to RideD constructor); note that setting this to 0 disables multicast!
 
         :param broker:
         :param address_pool: iterable of IP addresses (formatted as strings) that can be used to register multicast trees
@@ -50,6 +51,8 @@ class RideDEventSink(ThreadedEventSink):
         resiliently multicast delivered; others will be ignored
         :param maintenance_interval: seconds between running topology updates and reconstructing MDMTs if necessary,
         accounting for topology changes or new/removed subscribers
+        :param multicast: if True (default unless ntrees==0), build RideD for using multicast; otherwise, subscribers are alerting one
+        at a time (async) using unicast
         :param kwargs:
         """
         super(RideDEventSink, self).__init__(broker, subscriptions=subscriptions, **kwargs)
@@ -69,7 +72,7 @@ class RideDEventSink(ThreadedEventSink):
         self.subscribe(ev, callback=self.__class__.__on_coap_ready)
 
         # Store parameters for RideD resilient multicast middleware; we'll actually build it later since it takes a while...
-        self.use_multicast = multicast
+        self.use_multicast = multicast if ntrees else False
 
         if self.use_multicast and addresses is None:
             raise NotImplementedError("you must specify the multicast 'addresses' parameter if multicast is enabled!")
