@@ -70,6 +70,7 @@ class RideCApplication(RideC, ThreadedApplication):
         """Runs periodically to check for topology updates, reconstruct the MDMTs if necessary, and update flow
         rules to account for these topology changes or newly-joined/leaving subscribers."""
 
+        # TODO: should periodically run this?  not in our simulation experiments currently though...
         # THREADING: may need to lock data structures during this so we don't e.g. establish a route that no longer exists
         updated_routes = self.update()
         self.publish_route_updates(updated_routes)

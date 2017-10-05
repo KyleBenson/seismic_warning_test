@@ -121,8 +121,10 @@ class RideDEventSink(ThreadedEventSink):
                 self.rided = RideD(**self.rided)
             assert isinstance(self.rided, RideD)
 
-            # TODO: background instead of periodic?
-            self.timed_call(self.maintenance_interval, self.__class__.__maintain_topology, repeat=True)
+            # Rather than periodically update the topology, which in our experiments would result in perfectly routing
+            # around all the failures due to 0-latency control plane, we just update it once for now...
+            self.timed_call(self.maintenance_interval, self.__class__.__maintain_topology, repeat=False)
+            # self.timed_call(self.maintenance_interval, self.__class__.__maintain_topology, repeat=True)
 
         super(RideDEventSink, self).on_start()
 
