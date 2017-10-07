@@ -1,5 +1,6 @@
 SEISMIC_ALERT_TOPIC = 'seismic_alert'
 SEISMIC_PICK_TOPIC = 'seismic'
+IOT_GENERIC_TOPIC = "generic_iot_data"
 DATA_PATH_UPDATE_TOPIC = 'data_path_update'
 PUBLISHER_ROUTE_TOPIC = 'publisher_route'
 

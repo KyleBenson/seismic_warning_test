@@ -21,11 +21,12 @@ class SeismicAlertServer(VirtualSensor):
     It aggregates together all of these readings over a short period of time and
     then forwards the combined data ('seismic_alert') directly to interested subscribers.
     This forwarding is done using CoAP over UDP and the RideD resilient multicast middleware.
+    NOTE: it also receives generic IoT events and logs them to
     """
 
     def __init__(self, broker, sample_interval=2, event_type=SEISMIC_ALERT_TOPIC,
                  output_events_file="output_events_rcvd",
-                 subscriptions=(SEISMIC_PICK_TOPIC,), **kwargs):
+                 subscriptions=(SEISMIC_PICK_TOPIC, IOT_GENERIC_TOPIC), **kwargs):
         super(SeismicAlertServer, self).__init__(broker, event_type=event_type,
                                                  sample_interval=sample_interval, subscriptions=subscriptions, **kwargs)
 
@@ -93,12 +94,12 @@ class SeismicAlertServer(VirtualSensor):
         """Store this event for later aggregation"""
         if topic is None:
             topic = event.topic
-        assert topic == SEISMIC_PICK_TOPIC
-
-        log.debug("received seismic event for later processing")
-
-        event.metadata['time_aggd'] = time.time()
-        self.events_to_process.put(event)
+        if topic == SEISMIC_PICK_TOPIC:
+            log.debug("received seismic event for later processing")
+            event.metadata['time_aggd'] = time.time()
+            self.events_to_process.put(event)
+        else:
+            self.__output_events.append(event)
 
     def policy_check(self, event):
         return event is not None and event.data is not None
