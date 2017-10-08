@@ -55,13 +55,12 @@ class RideDEventSink(ThreadedEventSink):
         at a time (async) using unicast
         :param kwargs:
         """
-        super(RideDEventSink, self).__init__(broker, subscriptions=subscriptions, **kwargs)
+        super(RideDEventSink, self).__init__(broker, topics_to_sink=topics_to_sink, subscriptions=subscriptions, **kwargs)
 
         # Catalogue active subscribers' host addresses (indexed by topic with value being a set of subscribers)
         self.subscribers = dict()
 
         self.port = port
-        self.topics_to_sink = set(topics_to_sink)
         self.maintenance_interval = maintenance_interval
 
         # If we need to do anything with the server right away or expect some logic to be called
@@ -316,7 +315,7 @@ class RideDEventSink(ThreadedEventSink):
     def check_available(self, event):
         """We only deliver events whose topic matches those that have been registered
          with RIDE-D and currently have subscribers."""
-        return event.topic in self.topics_to_sink and event.topic in self.subscribers
+        return super(RideDEventSink, self).check_available(event) and event.topic in self.subscribers
 
     def on_stop(self):
         """Close any open network connections e.g. CoapClient"""
