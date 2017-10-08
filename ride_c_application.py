@@ -63,8 +63,16 @@ class RideCApplication(RideC, ThreadedApplication):
             self.register_data_path(dp, gw, cloud)
             # these will be started later, but we can create the objects for now
             dpm = RideCDataPathMonitor(data_path_id=dp, address=self.topology_manager.get_ip_address(cloud),
-                                       dst_port=dst_port, src_port=src_port, status_change_callback=self.on_data_path_status_change)
+                                       dst_port=dst_port, src_port=src_port, status_change_callback=self.__dp_status_change_cb)
             self._data_path_monitors.append(dpm)
+
+    def __dp_status_change_cb(self, data_path_id, link_status):
+        """Since the DPMonitors are running in background threads, we need to have them fire a callback that publishes
+        an event rather than calling self.on_data_path_status_change directly: this not only allows other apps to
+        receive such updates, but it also keeps us from having occasional threading-induced errors when e.g. both DPs
+        go DOWN simultaneously."""
+        update_event = self.make_event(data=dict(data_path_id=data_path_id, status=link_status), topic=DATA_PATH_UPDATE_TOPIC)
+        self.publish(update_event, topic=DATA_PATH_UPDATE_TOPIC)
 
     def __maintain_topology(self):
         """Runs periodically to check for topology updates, reconstruct the MDMTs if necessary, and update flow
