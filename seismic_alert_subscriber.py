@@ -72,6 +72,7 @@ class SeismicAlertSubscriber(ThreadedApplication):
                     ev['time_rcvd'] = time.time()
                     ev['copies_rcvd'] = 1
                     ev['agg_src'] = event.source
+                    ev['alert_time'] = event.timestamp
                     self.events_rcvd[ev_id] = ev
                 else:
                     self.events_rcvd[ev_id]['copies_rcvd'] += 1
