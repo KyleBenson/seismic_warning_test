@@ -1,13 +1,13 @@
 # @author: Kyle Benson
 # (c) Kyle Benson 2017
 
-
 from ride.ride_c import RideC
 from ride.data_path_monitor import RideCDataPathMonitor
 
 from scale_client.core.threaded_application import ThreadedApplication
 from seismic_alert_common import DATA_PATH_UPDATE_TOPIC, PUBLISHER_ROUTE_TOPIC
 
+import threading
 import logging
 log = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ class RideCApplication(RideC, ThreadedApplication):
         # XXX: need to specify broker as a kwarg so it doesn't get passed to RideC as a positional
         super(RideCApplication, self).__init__(broker=broker, subscriptions=subscriptions,
                                                n_threads=len(data_paths),  # need a thread for each DataPathMonitor
-                                               advertisements=[PUBLISHER_ROUTE_TOPIC], **kwargs)
+                                               advertisements=[PUBLISHER_ROUTE_TOPIC, DATA_PATH_UPDATE_TOPIC], **kwargs)
 
         self.maintenance_interval = maintenance_interval
 
@@ -66,12 +66,15 @@ class RideCApplication(RideC, ThreadedApplication):
                                        dst_port=dst_port, src_port=src_port, status_change_callback=self.__dp_status_change_cb)
             self._data_path_monitors.append(dpm)
 
+        # XXX: need to prevent multiple status changes from occurring simultaneously
+        self.__dp_status_lock = threading.Lock()
+
     def __dp_status_change_cb(self, data_path_id, link_status):
         """Since the DPMonitors are running in background threads, we need to have them fire a callback that publishes
         an event rather than calling self.on_data_path_status_change directly: this not only allows other apps to
         receive such updates, but it also keeps us from having occasional threading-induced errors when e.g. both DPs
         go DOWN simultaneously."""
-        update_event = self.make_event(data=dict(data_path_id=data_path_id, status=link_status), topic=DATA_PATH_UPDATE_TOPIC)
+        update_event = self.make_event(data=dict(data_path_id=data_path_id, status=link_status), event_type=DATA_PATH_UPDATE_TOPIC)
         self.publish(update_event, topic=DATA_PATH_UPDATE_TOPIC)
 
     def __maintain_topology(self):
@@ -88,7 +91,7 @@ class RideCApplication(RideC, ThreadedApplication):
         # XXX: since RideD only accepts IP addresses, we need to extract that from the host addresses that may include ports
         # ENHANCE: either move this conversion to RideD, or accept a complete host address in RideD
         updated_routes = {self._get_host_ip_address(k): v for k,v in updated_routes.items()}
-        route_update_event = self.make_event(data=updated_routes, topic=PUBLISHER_ROUTE_TOPIC)
+        route_update_event = self.make_event(data=updated_routes, event_type=PUBLISHER_ROUTE_TOPIC)
         self.publish(route_update_event, topic=PUBLISHER_ROUTE_TOPIC)
 
     def on_start(self):
@@ -128,7 +131,10 @@ class RideCApplication(RideC, ThreadedApplication):
         """Whenever we receive a DataPath update event, pass its contents to RideC to update the status."""
         assert topic == DATA_PATH_UPDATE_TOPIC, "received non-DataPath update event with topic %s" % topic
 
-        self.on_data_path_status_change(**event.data)
+        # XXX: we seem to get errors when multiple data paths fail simultaneously: set changed size, list index out of
+        # range, etc., which all seem to be related to circuits processing events simultaneously?
+        with self.__dp_status_lock:
+            self.on_data_path_status_change(**event.data)
 
     # ENHANCE: migrate publisher/data_path registration to an API rather than command line...
     #
