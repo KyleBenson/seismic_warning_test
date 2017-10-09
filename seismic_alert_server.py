@@ -57,6 +57,11 @@ class SeismicAlertServer(VirtualSensor):
         # NOTE: no one remote should POST/DEL only PUT
         server.store_event(event, path, disable_post=True, disable_delete=True)
 
+        # do the same for generic iot data
+        event = self.make_event(event_type=IOT_GENERIC_TOPIC, data=None)
+        path = '/events/%s' % IOT_GENERIC_TOPIC
+        server.store_event(event, path, disable_post=True, disable_delete=True)
+
     def read_raw(self):
         """After receiving the first 'pick', a 'seismic_alert' SensedEvent is created
         every 'sample_interval' seconds.  This alert contains aggregated relevant data for all of
