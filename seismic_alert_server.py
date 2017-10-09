@@ -97,9 +97,11 @@ class SeismicAlertServer(VirtualSensor):
         """Store this event for later aggregation"""
         if topic is None:
             topic = event.topic
+
+        # record the time we received (generic data) / aggregated (picks) the data
+        event.metadata['time_aggd'] = time.time()
         if topic == SEISMIC_PICK_TOPIC:
             log.debug("received seismic event for later processing")
-            event.metadata['time_aggd'] = time.time()
             self.events_to_process.put(event)
         else:
             self.__output_events.append(event)
