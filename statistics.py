@@ -5,12 +5,147 @@ STATISTICS_DESCRIPTION = '''Gathers statistics from the output files in order to
      an easily-read format as well as creating plots.'''
 
 import numpy as np
-import matplotlib.pyplot as plt
+import pandas as pd
+import parse
 import argparse
 import sys
 import os
 import json
-import logging as log
+import logging
+logging.basicConfig()
+log = logging.getLogger(__name__)
+
+from scale_client.core.sensed_event import SensedEvent
+from seismic_alert_common import *
+from config import get_ip_mac_for_host
+
+
+def get_host_ip(hid):
+    # XXX: we only have the host ID but not IP address, so just build it with our helper functions, noting that
+    # the edge/cloud server names are essentially all s0/x0
+
+    if hid == 'srv' or hid == 'edge':
+        hid = 's0'
+    elif hid == 'cloud':
+        hid = 'x0'
+
+    hip = get_ip_mac_for_host(hid)[0]
+    # XXX: host_ip includes subnet mask #bits
+    hip = hip.split('/')[0]
+
+    return hip
+
+
+class ParsedSeismicOutput(pd.DataFrame):
+    """
+    Parses the output from one of the seismic client apps running in the scale_client and stores it in a pandas.DataFrame
+    for later manipulation and aggregation with the other client outputs.
+    """
+
+    def __init__(self, data, host_id=None, **kwargs):
+        """
+        Parses the raw JSON data into a dict of events recorded by the client and passes the resulting data into
+        a pandas.DataFrame with additional columns specified by kwargs, which should include e.g. host_id, run#, etc.
+        :param data: raw json string of event data the client recorded
+        :type data: str
+        :param kwargs: additional static values for columns to distinguish this group of events from others e.g. host_id
+        """
+
+        data = json.loads(data)
+        # sub-classes may extract the column data in different ways depending on the output format
+        columns = self.extract_columns(data)
+        columns.update(kwargs)
+
+        if host_id is not None:
+            # also make sure to keep the host_id column if requested!
+            columns['host_id'] = host_id
+            columns['host_ip'] = get_host_ip(host_id)
+
+        super(ParsedSeismicOutput, self).__init__(columns)
+
+        # self.host_type = kwargs.get('host_type', self.__class__.__name__)
+
+    @classmethod
+    def extract_columns(cls, data):
+        raise NotImplementedError
+
+    def __str__(self):
+        return "%s parsed results:\n%s" % (self.__class__.__name__, super(ParsedSeismicOutput, self).__str__())
+
+
+class SensedEventParsedSeismicOutput(ParsedSeismicOutput):
+    """
+    The events contained in the output are formatted as a list of SCALE SensedEvents
+    """
+
+    @classmethod
+    def extract_columns(cls, data):
+        """
+        Extracts the important columns from the given list of SensedEvents
+        :param data:
+        :return:
+        """
+        events = [SensedEvent.from_map(e) for e in data]
+        cols = {'topic': [ev.topic for ev in events],
+                'time_sent': [ev.timestamp for ev in events],
+                # TODO: might not even want this? what to do with it? the 'scale-local:/' part makes it less useful...
+                'source': [ev.source for ev in events],
+                # all the events these types receive are seq#s; could move this down to derived class if needed...
+                'seq': [ev.data for ev in events],
+                }
+        return cols
+
+
+class PublisherOutput(SensedEventParsedSeismicOutput):
+    """Output from a single SeismicAlertPublisher process, which is just a list of SensedEvents"""
+    pass
+    # @classmethod
+    # def extract_columns(cls, data):
+    #     """Change the column name for 'data'"""
+    #     cols = super(PublisherOutput, cls).extract_columns(data)
+    #     cols['seq'] = cols.pop('data')
+    #     return cols
+
+
+class ServerOutput(SensedEventParsedSeismicOutput):
+    """Output from a SeismicAlertServer, which is also just a list of SensedEvents.  The seismic events were received,
+     stamped with the time they were aggregated, and later sent out as alerts.  The generic IoT data events are just
+     stored as is."""
+
+    @classmethod
+    def extract_columns(cls, data):
+        """We need to extract the time each pick was received at the server for processing"""
+        cols = super(ServerOutput, cls).extract_columns(data)
+        cols['time_rcvd'] = [cls.get_aggregation_time(ev) for ev in (SensedEvent.from_map(e) for e in data)]
+        cols['src_ip'] = [get_hostname_from_path(src) for src in cols.pop('source')]
+        return cols
+
+    @staticmethod
+    def get_aggregation_time(event):
+        """
+        :type event: SensedEvent
+        """
+        # XXX: we didn't include this timestamp in generic iot data originally, so return None if so...
+        return event.metadata.get("time_aggd")
+
+
+class SubscriberOutput(ParsedSeismicOutput):
+    """
+    Output from a single SeismicAlertSubscriber instance, which is quite different from the other apps.
+    It's a dictionary mapping event_ids to event data: time_rcvd, copies_rcvd, and agg_src (edge or cloud server).
+    We'll store these events in a similar manner but split up the event_id into event sequence # and source host so
+    that we can get the events by quake ID and/or source host
+    """
+
+    @classmethod
+    def extract_columns(cls, data):
+        return {'seq': [get_seq_from_event_id(event_id) for event_id, metadata in data.items()],
+                'pub_ip': [get_source_from_event_id(event_id) for event_id, metadata in data.items()],
+                'time_alert_rcvd': [metadata['time_rcvd'] for event_id, metadata in data.items()],
+                'copies_rcvd': [metadata['copies_rcvd'] for event_id, metadata in data.items()],
+                'alert_src': ['edge' if "Edge" in metadata['agg_src'] else 'cloud' for event_id, metadata in data.items()],
+                # TODO: add artificial topic column for merging?
+                }
 
 
 class SeismicStatistics(object):
@@ -20,7 +155,8 @@ class SeismicStatistics(object):
 
     General strategy:
     -- Each directory represents a single experiment
-    -- Each file in that directory represents the readings received by a single subscriber
+    -- Each file in that directory represents the events output from a single client (publications,
+       alerts received by subscribers, etc.)
     -- Each reading tells us when it was first sent and when it was received
     -- So each time step has a number of readings received by this client
     -- Hence we should average over this # readings across all clients
@@ -39,8 +175,8 @@ class SeismicStatistics(object):
         # store all the parsed stats indexed by directory name, then by filename
         self.stats = dict()
 
-        log_level = log.getLevelName(debug.upper())
-        log.basicConfig(format='%(levelname)s:%(message)s', level=log_level)
+        log_level = logging.getLevelName(debug.upper())
+        log.setLevel(log_level)
 
     @classmethod
     def get_arg_parser(cls):
@@ -57,7 +193,7 @@ class SeismicStatistics(object):
                                          # epilog='Text to display at the end of the help print',
                                          )
 
-        parser.add_argument('--dirs', '-d', type=str, nargs="+", default=['output'],
+        parser.add_argument('--dirs', '-d', type=str, nargs="+", default=['results'],
                             help='''directories containing files from which to read outputs
                             (default=%(default)s)''')
         parser.add_argument('--debug', '--verbose', '-v', type=str, default='info', nargs='?', const='debug',
@@ -84,53 +220,213 @@ class SeismicStatistics(object):
         if stats is None:
             stats = self.stats
         for dirname in dirs_to_parse:
+            log.debug("parsing directory %s" % dirname)
             stats[dirname] = self.parse_dir(dirname)
         return stats
 
     def parse_dir(self, dirname):
+        # TODO: separate into pubs, subs, srv?
         results = dict()
         for filename in os.listdir(dirname):
             parsed = self.parse_file(os.path.join(dirname, filename))
-            results[filename] = parsed
+            if parsed is not None:
+                if parsed.empty:
+                    log.warning("file %s returned empty results!" % filename)
+                else:
+                    log.debug('parsed file %s; returned %s results with head: %s' % (filename, parsed.__class__.__name__, parsed.head()))
+                results[filename] = parsed
         return results
 
     def parse_file(self, fname):
         with open(fname) as f:
-            return json.loads(f.read())
+            data = f.read()
 
-    @classmethod
-    def get_publishers(cls, group):
-        return cls.split_publishers_subscribers(group)[0]
-    @classmethod
-    def get_subscribers(cls, group):
-        return cls.split_publishers_subscribers(group)[1]
+            # Build up the kwargs that we'll use to label data columns with run#, host_id, etc.
+            path_parts, fname = os.path.split(fname)
+            # the files themselves are stored in a directory for that experiment run, with each of these run dirs
+            # appearing under a directory named for the experimental treatment
+            path_parts, run_dir = os.path.split(path_parts)
+            path_parts, treatment = os.path.split(path_parts)
+            treatment = treatment.replace('outputs_', '')  # the dir usually starts with this, so just cut it off
+            try:
+                run = parse.parse('run{:d}', run_dir)[0]
+            except IndexError:
+                run = 0
+            # we parse using these indices in case the fname is e.g. srv
+            host_id = fname.split('_')[-1]
+            host_type = fname.split('_')[0]
+            host_type = 'edge' if host_type == 'srv' else host_type  # translate name
 
-    @classmethod
-    def split_publishers_subscribers(cls, group):
-        pubres = dict()
-        subres = dict()
-        for group_name, results in group.items():
-            # XXX: we assume the group's name/key is a filename starting with either publisher or subscriber
-            if group_name.startswith('publisher'):
-                pubres[group_name] = results
-            elif group_name.startswith('subscriber'):
-                subres[group_name] = results
+            cols = dict(host_id=host_id,                      # e.g. h0-b12, srv, cloud
+                        host_type=host_type,                  # e.g. publisher, congestor, subscriber, srv, cloud
+                        run=run,
+                        )
+            if treatment:
+                cols['treatment'] = treatment
+
+            if host_type == 'subscriber':
+                return SubscriberOutput(data, **cols)
+            elif host_type == 'publisher':
+                return PublisherOutput(data, **cols)
+            elif host_type == 'congestor':
+                return PublisherOutput(data, **cols)
+            elif host_type == 'edge' or host_type == 'cloud':
+                return ServerOutput(data, **cols)
             else:
-                log.error("expected group/file name to start with either publisher or subscriber to identify them! instead got: %s" % group_name)
+                log.error("skipping unrecognized output file type with name: %s" % fname)
+                return None
 
-        return pubres, subres
 
-    @classmethod
-    def get_latencies(cls, group):
-        """Returns the latencies (delta from time originally sent by publisher until
-        when the subscriber received the event) for this group of results
-        (directory of client outputs).
-        :param group: dictionary of {filename: parsed_results} pairs representing the
-        results of a single experiment in terms of seismic client outputs
-        :return latencies: where len(latencies) = num_sensors * num_subscribers,
-         assuming all subscribers received all publications
-        :rtype: np.array[float]
+    #########################################################################################################
+    ####          FILTERING,  AGGREGATION,   and METRICS
+    ### Helper functions for getting parsed outputs from certain types of clients
+    ## Gathering certain types of results, which becomes hierarchical to build up to our final results
+    #########################################################################################################
+
+    ## Level 0: filter by treatment group (directory name) and arbitrary column parameters
+
+    # This will be used for the others
+    def filter_outputs_by_params(self, group=None, **param_matches):
+        """Filter the ParsedOutputs by the values of the specified parameters including the group
+         (experimental treatment) name.  The param_matches keys are columns and
+        its values are the values all elements of that column should have (static data).
+        If you want to filter ranges of the data, just use the pandas DataFrame operations.
+
+        NOTE: this also filters out any empty data frames!
         """
+        if group is None:
+            groups = self.stats.items()
+        else:
+            groups = ((group, self.stats[group]),)
+        return [parsed for group, file_results in groups for fname, parsed in file_results.items() if
+                not parsed.empty and all((parsed[k] == v).all() for k, v in param_matches.items())]
+
+    # TODO: make filter handle operations other than ==  ?
+    filter = filter_outputs_by_params
+
+
+    # Levels 0-1: filtering by treatment group then by output type (from what host type)
+
+    def subscribers(self, **kwargs):
+        return self.filter_outputs_by_params(host_type='subscriber', **kwargs)
+    def publishers(self, **kwargs):
+        return self.filter_outputs_by_params(host_type='publisher', **kwargs)
+    def iot_congestors(self, **kwargs):
+        return self.filter_outputs_by_params(host_type='congestor', **kwargs)
+    def edge_servers(self, **kwargs):
+        return self.filter_outputs_by_params(host_type='edge', **kwargs)
+    def cloud_servers(self, **kwargs):
+        return self.filter_outputs_by_params(host_type='cloud', **kwargs)
+
+    # Level 2: combining the different outputs to view events flowing through the system
+
+    def picks(self, **kwargs):
+        """
+        The seismic pick messages sent from publishers-->server
+        :returns: a single pandas.DataFrame containing all of the picks, filtered by the optional parameter equalities
+        """
+        # IDEA: merge all the publication data so we have unique source, seq# keys;
+        # merge cloud/edge server, then join these two tables so we have time_sent, time_rcvd, and sink=cloud/srv
+        pubs = self.publishers(**kwargs)
+        # also filter out the generic_iot_data from these
+        clouds = [df[df.topic == SEISMIC_PICK_TOPIC] for df in self.cloud_servers(**kwargs)]
+        edges = [df[df.topic == SEISMIC_PICK_TOPIC] for df in self.edge_servers(**kwargs)]
+
+        # merge the lists down to a single DataFrame
+        pubs = reduce(lambda left, right: pd.merge(left, right, how='outer', sort=False), pubs)
+        servers = reduce(lambda left, right: pd.merge(left, right, how='outer', sort=False), clouds + edges)
+
+        # before joining the two tables, handle removing/renaming some columns that would cause conflicts:
+        # - all useless: pubs.source, servers.host_ip/id, pubs.host_type
+        # - servers.src_ip is the pub's host_ip
+        # - host_type would conflict, but we'll use the servers' column as 'sink'
+        del pubs['source']
+        del pubs['host_type']
+        del servers['host_ip']
+        del servers['host_id']
+        pubs.rename(columns=dict(host_ip='src_ip', host_id='src_id'), inplace=True)
+        servers.rename(columns=dict(host_type='sink'), inplace=True)
+
+        # Do a left join so we know which picks were sent even if they weren't received
+        picks = pubs.merge(servers,  how='left')
+        return picks
+
+    def alerts(self, **kwargs):
+        """The seismic alerts sent from the server, which aggregated all the recent picks, to the subscribers"""
+        # same as with picks() but with subscribers now, alert_src=cloud/srv, and time_sent being from the metadata alert_time
+        subs = self.subscribers(**kwargs)
+        # also filter out the generic_iot_data from these
+        clouds = [df[df.topic == SEISMIC_PICK_TOPIC] for df in self.cloud_servers(**kwargs)]
+        edges = [df[df.topic == SEISMIC_PICK_TOPIC] for df in self.edge_servers(**kwargs)]
+
+        # merge the lists down to a single DataFrame
+        subs = reduce(lambda left, right: pd.merge(left, right, how='outer', sort=False), subs)
+        servers = reduce(lambda left, right: pd.merge(left, right, how='outer', sort=False), clouds + edges)
+
+        # before joining the two tables, handle removing/renaming some columns that would cause conflicts:
+        # - all useless: servers.host_ip/id, subs.host_type
+        # - servers.src_ip is the pub's host_ip
+        # - host_type would conflict, but we'll use the servers' column as 'sink'
+        del subs['host_type']
+        del servers['host_ip']
+        del servers['host_id']
+        del servers['time_sent']  # just for picks
+        del servers['topic']
+        subs.rename(columns=dict(host_ip='sub_ip', host_id='sub_id'), inplace=True)
+        servers.rename(columns=dict(host_type='alert_src', time_rcvd='time_alert_sent', src_ip='pub_ip'), inplace=True)
+
+        # Do right join so we know what alerts were sent even if not received
+        alerts = subs.merge(servers,  how='right', sort=False)
+        return alerts
+
+    def iot_traffic(self, **kwargs):
+        """Generic constant-rate IoT background traffic send from publishers-->server"""
+        # same as with picks just with different topics
+        pubs = self.iot_congestors(**kwargs)
+        clouds = [df[df.topic == IOT_GENERIC_TOPIC] for df in self.cloud_servers(**kwargs)]
+        edges = [df[df.topic == IOT_GENERIC_TOPIC] for df in self.edge_servers(**kwargs)]
+
+        # merge the lists down to a single DataFrame
+        pubs = reduce(lambda left, right: pd.merge(left, right, how='outer', sort=False), pubs)
+        servers = reduce(lambda left, right: pd.merge(left, right, how='outer', sort=False), clouds + edges)
+
+        # before joining the two tables, handle removing/renaming some columns that would cause conflicts:
+        # - all useless: pubs.source, servers.host_ip/id, pubs.host_type
+        # - servers.src_ip is the pub's host_ip
+        # - host_type would conflict, but we'll use the servers' column as 'sink'
+        del pubs['source']
+        del pubs['host_type']
+        del servers['host_ip']
+        del servers['host_id']
+        pubs.rename(columns=dict(host_ip='src_ip', host_id='src_id'), inplace=True)
+        servers.rename(columns=dict(host_type='sink'), inplace=True)
+
+        # Do a left join so we know which data was sent even if it wasn't received
+        data = pubs.merge(servers,  how='left', sort=False)
+        return data
+
+    # Level 3: seismic events end-to-end view: combine picks/alerts
+
+    def seismic_events(self, **kwargs):
+        # IDEA: just use our previous two helpers, but with slightly modified columns
+        picks = self.picks(**kwargs)
+        alerts = self.alerts(**kwargs)
+
+        picks.rename(columns=dict(src_id='pub_id', src_ip='pub_ip', sink='alert_src',
+                                  time_sent='time_pick_sent', time_rcvd='time_pick_rcvd'), inplace=True)
+        alerts.rename(columns=dict(), inplace=True)
+        print picks
+        print alerts
+
+        # need outer join to merge all the parts together
+        events = picks.merge(alerts, how='outer', sort=False)
+        return events
+
+    # Level 4: calculating metrics, which can then be viewed over time, by quake ID, etc.
+
+    # TODO: 3 forms of this: __generic --> collection, dissemination, end2end
+    def latencies(self, **kwargs):
+        pass
 
         latencies = []
         subs_results = cls.get_subscribers(group).values()
@@ -142,8 +438,7 @@ class SeismicStatistics(object):
 
         return np.array(latencies)
 
-    @classmethod
-    def get_reachability(cls, group, nsubscribers=None):
+    def reachabilities(self, **kwargs):
         """
         Gets the 'reachability' of the group, which is the normalized # sensors
         that received any aggregated results messages, which are assumed to actually
@@ -170,16 +465,20 @@ class SeismicStatistics(object):
         assert reachability <= 1.0, "reachability should be in range [0,1]!!"
         return reachability
 
+
+    # TODO: what else? service availability?
+
+    def runs(self, run_num):
+        return self.filter_outputs_by_params(run=run_num)
+
+    # TODO: probably just use pandas to do this?
+
     @classmethod
-    def plot_cdf(cls, stats, num_bins=10):
-        """Plots the CDF of the number of seismic events received over time
-         at interested clients. Averaged over all subscribers.
+    def get_cdf(cls, stats, num_bins=10):
+        """Gets the CDF of the number of seismic events received over time at interested clients.
+        Averaged over all subscribers.
         :param dict stats: dict of <group_name: group_stats> pairs where each group is an experimental treatment
         """
-
-        # TODO: use these markers
-        # markers = 'x.*+do^s1_|'
-        # plot(..., marker=markers[i%len(markers)])
 
         for (group_name, group) in stats.items():
             latencies = cls.get_latencies(group)
@@ -192,48 +491,9 @@ class SeismicStatistics(object):
                 weight_adjustment = [1.0/npublishers/nsubscribers] * len(latencies)
                 counts, bin_edges = np.histogram(latencies, bins=num_bins, weights=weight_adjustment)
                 cdf = np.cumsum(counts)
-                plt.plot(bin_edges[1:], cdf, label=cls.get_label_for_group(group_name))
+                # plt.plot(bin_edges[1:], cdf, label=cls.get_label_for_group(group_name))
             except ZeroDivisionError:
                 log.error("Group %s (%d pubs; %d subs) had ZeroDivisionError and was skipped. len(group)=%d" % (group_name, npublishers, nsubscribers, len(group)))
-
-        plt.xlabel("time(secs)")
-        # TODO: put x scale as log? maybe y too?
-        plt.ylabel("avg % readings rcvd")
-        plt.title('Sensor readings received over time')
-        plt.legend(loc=0)  # loc=0 --> auto
-        plt.show()
-
-    @classmethod
-    def get_label_for_group(cls, group_name):
-        """
-        Returns a human-readable label for the given group_name, which is assumed
-        to be a path to the directory containing the client output files.  Hence
-        we just return the last part of that path.
-        :param group_name:
-        :return:
-        """
-        return os.path.split(group_name)[-1]
-
-    def plot_time(self):
-        """Plots the events' latencies over time.  Useful for
-        determining if event processing slows down over time or spikes
-        at a certain point.  CURRENTLY NOT IMPLEMENTED"""
-
-        raise NotImplementedError
-        # TODO: fix the code below as it appears to have been copy/pasted from a different analyzer file
-
-        # Rather than raw datetimes, we want to use the total seconds since the
-        # simulation's start
-        timestamps = [e.timestamp for e in self.events]
-        tmin = min(timestamps)
-        timestamps = [(t-tmin).total_seconds() for t in timestamps]
-
-        plt.plot(timestamps, self.get_latencies())
-        plt.xlabel("time(s)")
-        plt.ylabel("latency(ms)")
-        plt.title('Event latency over time')
-        plt.legend(loc=0)  # loc=0 --> auto
-        plt.show()
 
     def print_statistics(self):
         """Prints summary statistics for all groups, in particular
@@ -246,15 +506,54 @@ class SeismicStatistics(object):
             reach = self.get_reachability(group)
             print "Group %s's reachability: %f" % (group_name, reach)
 
-    # could use this if we ever put the events into some kind of object
-    # def __repr__(self):
-    #     s = "SensedEvent (%s) with value %s" % (self.get_type(), str(self.get_raw_data()))
-    #     s += pprint.pformat(self.data, width=1)
-    #     return s
+    def output_data(self):
+        """Writes the data to a file that can be imported to e.g. plot.ly"""
+        # TODO: what are we going to output?  certainly not the raw data right?  first collect all event data/timestamps?
+        pass
 
 
 if __name__ == '__main__':
+    # lets you print the data frames out on a wider screen
+    pd.set_option('display.max_columns', 15)  # seismic_events has 14 columns
+    pd.set_option('display.width', 2500)
+
     stats = SeismicStatistics.build_from_args(sys.argv[1:])
     stats.parse_all()
-    stats.print_statistics()
-    stats.plot_cdf(stats.stats)
+
+    ### some simple test output
+
+    # for outs in stats.subscribers():
+    # for outs in stats.publishers():
+    # for outs in stats.iot_congestors():
+    # for outs in stats.edge_servers():
+    # for outs in stats.cloud_servers():
+    # for outs in [stats.picks()]:  # it's aggregated to a single DF!
+    # for outs in [stats.alerts()]:  # it's aggregated to a single DF!
+    # for outs in [stats.iot_traffic()]:  # it's aggregated to a single DF!
+    for outs in [stats.seismic_events()]:  # it's aggregated to a single DF!
+        # WARNING: can't do fancy comparison slicing with an empty data frame!
+        print outs
+
+        # print 'edge alerts:\n', outs[outs.alert_src == 'edge']
+        # print "edge-sunk iot traffic:\n", outs[(outs.sink == 'edge')]
+        # if outs.empty:
+        #     print 'EMPTY OUTPUT:', outs
+        #     continue
+        # filt = outs[outs['topic'] == 'seismic']
+        # print outs.loc[1:4,['host_ip', 'host_type', 'host_id']]
+
+
+    #### COOKBOOK recipes for various operations we may want to perform later
+
+    ## handling duplicated picks e.g. from sending a pick CON and continually retransmitting because ACK never processed properly
+    # no_dups = pubs.merge(servers.drop_duplicates(['src_ip', 'run', 'seq']), how='left')
+    # print 'NO DUPES:\n', no_dups
+    # print 'THE DUPES:\n', servers[servers.duplicated(['src_ip', 'run', 'seq'], False)]
+    # print "non-null PICKS:\n", len(outs[pd.notnull(outs.sink)])
+
+
+    #### WARNINGS to watch out for during data analysis:
+    #
+    # Alerts may appear to have a mis-matched # from cloud vs. edge since a subscriber might receive it from cloud first,
+    #   the pub retransmits due to lack of ACK, it gets to the edge at some point and is then alerted out to subs, which
+    #   won't record it since they've already received one from the cloud!
