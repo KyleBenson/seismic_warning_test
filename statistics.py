@@ -19,6 +19,8 @@ from scale_client.core.sensed_event import SensedEvent
 from seismic_alert_common import *
 from config import get_ip_mac_for_host
 
+DEFAULT_TIMEZONE='America/Los_Angeles'
+
 
 def get_host_ip(hid):
     # XXX: we only have the host ID but not IP address, so just build it with our helper functions, noting that
@@ -40,6 +42,9 @@ class ParsedSeismicOutput(pd.DataFrame):
     """
     Parses the output from one of the seismic client apps running in the scale_client and stores it in a pandas.DataFrame
     for later manipulation and aggregation with the other client outputs.
+
+    NOTE: any columns with labels matching 'time*' will be converted to pandas.Timestamp with the expectation that
+    they're in Unix epoch format!
     """
 
     def __init__(self, data, host_id=None, **kwargs):
@@ -59,7 +64,21 @@ class ParsedSeismicOutput(pd.DataFrame):
         if host_id is not None:
             # also make sure to keep the host_id column if requested!
             columns['host_id'] = host_id
+            # XXX: since clients don't always know their IP address, we can just translate their ID to it
             columns['host_ip'] = get_host_ip(host_id)
+
+        # XXX: convert known columns to more specific pandas data types
+        for k, val in columns.items():
+            # XXX: any columns starting with 'time' should be converted to pandas.Timestamp!
+            if k.startswith('time'):
+                columns[k] = pd.to_datetime(val, unit='s')
+                columns[k].tz = DEFAULT_TIMEZONE
+            # TODO: figure out how to take a single value and share it through all rows as a category when it's just a string.
+            # BUT: we can't have the values of a category be null so how to do this with picks and e.g. 'sink'???
+            # XXX: basically everything else that isn't numeric is a category
+            # elif k.endswith('_ip') or k.endswith('_id'):
+            # elif isinstance(k, basestring):
+            #     columns[k] = pd.Series(val, dtype='category')
 
         super(ParsedSeismicOutput, self).__init__(columns)
 
@@ -286,20 +305,21 @@ class SeismicStatistics(object):
     ## Level 0: filter by treatment group (directory name) and arbitrary column parameters
 
     # This will be used for the others
-    def filter_outputs_by_params(self, group=None, **param_matches):
+    def filter_outputs_by_params(self, group=None, include_empty=False, **param_matches):
         """Filter the ParsedOutputs by the values of the specified parameters including the group
          (experimental treatment) name.  The param_matches keys are columns and
         its values are the values all elements of that column should have (static data).
         If you want to filter ranges of the data, just use the pandas DataFrame operations.
 
         NOTE: this also filters out any empty data frames!
+        :rtype: pd.DataFrame
         """
         if group is None:
             groups = self.stats.items()
         else:
             groups = ((group, self.stats[group]),)
         return [parsed for group, file_results in groups for fname, parsed in file_results.items() if
-                not parsed.empty and all((parsed[k] == v).all() for k, v in param_matches.items())]
+                (not parsed.empty or include_empty) and all((parsed[k] == v).all() for k, v in param_matches.items())]
 
     # TODO: make filter handle operations other than ==  ?
     filter = filter_outputs_by_params
@@ -308,14 +328,19 @@ class SeismicStatistics(object):
     # Levels 0-1: filtering by treatment group then by output type (from what host type)
 
     def subscribers(self, **kwargs):
+        """:rtype: pd.DataFrame"""
         return self.filter_outputs_by_params(host_type='subscriber', **kwargs)
     def publishers(self, **kwargs):
+        """:rtype: pd.DataFrame"""
         return self.filter_outputs_by_params(host_type='publisher', **kwargs)
     def iot_congestors(self, **kwargs):
+        """:rtype: pd.DataFrame"""
         return self.filter_outputs_by_params(host_type='congestor', **kwargs)
     def edge_servers(self, **kwargs):
+        """:rtype: pd.DataFrame"""
         return self.filter_outputs_by_params(host_type='edge', **kwargs)
     def cloud_servers(self, **kwargs):
+        """:rtype: pd.DataFrame"""
         return self.filter_outputs_by_params(host_type='cloud', **kwargs)
 
     # Level 2: combining the different outputs to view events flowing through the system
@@ -324,6 +349,7 @@ class SeismicStatistics(object):
         """
         The seismic pick messages sent from publishers-->server
         :returns: a single pandas.DataFrame containing all of the picks, filtered by the optional parameter equalities
+        :rtype: pd.DataFrame
         """
         # IDEA: merge all the publication data so we have unique source, seq# keys;
         # merge cloud/edge server, then join these two tables so we have time_sent, time_rcvd, and sink=cloud/srv
@@ -352,7 +378,10 @@ class SeismicStatistics(object):
         return picks
 
     def alerts(self, **kwargs):
-        """The seismic alerts sent from the server, which aggregated all the recent picks, to the subscribers"""
+        """
+        The seismic alerts sent from the server, which aggregated all the recent picks, to the subscribers
+        :rtype: pd.DataFrame
+        """
         # same as with picks() but with subscribers now, alert_src=cloud/srv, and time_sent being from the metadata alert_time
         subs = self.subscribers(**kwargs)
         # also filter out the generic_iot_data from these
@@ -380,7 +409,8 @@ class SeismicStatistics(object):
         return alerts
 
     def iot_traffic(self, **kwargs):
-        """Generic constant-rate IoT background traffic send from publishers-->server"""
+        """Generic constant-rate IoT background traffic send from publishers-->server
+        :rtype: pd.DataFrame"""
         # same as with picks just with different topics
         pubs = self.iot_congestors(**kwargs)
         clouds = [df[df.topic == IOT_GENERIC_TOPIC] for df in self.cloud_servers(**kwargs)]
@@ -414,9 +444,6 @@ class SeismicStatistics(object):
 
         picks.rename(columns=dict(src_id='pub_id', src_ip='pub_ip', sink='alert_src',
                                   time_sent='time_pick_sent', time_rcvd='time_pick_rcvd'), inplace=True)
-        alerts.rename(columns=dict(), inplace=True)
-        print picks
-        print alerts
 
         # need outer join to merge all the parts together
         events = picks.merge(alerts, how='outer', sort=False)
@@ -424,47 +451,75 @@ class SeismicStatistics(object):
 
     # Level 4: calculating metrics, which can then be viewed over time, by quake ID, etc.
 
-    # TODO: 3 forms of this: __generic --> collection, dissemination, end2end
-    def latencies(self, **kwargs):
-        pass
+    def latencies(self, data, resolution='ms'):
+        """
+        Adds a column to the given DataFrame with the latency (timedelta from sending time to receiving time), which
+        is in the optionally requested resolution.  The 'sending time' and 'receiving time' are calculated by trying
+        to find the difference of the relevant attributes in the following order:
+        1) seismic_events are 'time_pick_sent/time_alert_rcvd'
+        2) picks/traffic are 'time_sent/time_rcvd'
+        3) alerts are 'time_alert_sent/time_alert_rcvd'
 
-        latencies = []
-        subs_results = cls.get_subscribers(group).values()
-        for sub_results in subs_results:
-            for event in sub_results.values():
-                time_rcvd = event['time_rcvd']
-                time_sent = event['time_sent']
-                latencies.append(time_rcvd - time_sent)
+        :param data: the data to compute latencies on
+        :type data: pd.DataFrame
+        :param resolution: str representing the timedelta units/resolution e.g. ms, s, 10ms
+        NOTE: resolution='10ms' would mean 1sec-->100; 13ms->1
+        :rtype: pd.DataFrame
+        """
 
-        return np.array(latencies)
+        # XXX: just try finding the 3 different latency types in increasing generality
+        try:
+            # seismic events
+            data['latency'] = (data.time_alert_rcvd - data.time_pick_sent).astype('timedelta64[%s]' % resolution)
+        except AttributeError:
+            try:
+                # alerts
+                data['latency'] = (data.time_alert_rcvd - data.time_alert_sent).astype('timedelta64[%s]' % resolution)
+            except AttributeError:
+                try:
+                    # picks / traffic
+                    data['latency'] = (data.time_rcvd - data.time_sent).astype('timedelta64[%s]' % resolution)
+                except AttributeError:
+                    raise AttributeError("data columns not recognized: expected to find time[_alert|_pick]_<sent|rcvd>")
+
+        # TODO: we can only do resampling when the INDEX is time, so we'd have to convert it to that first...
+        # could help us look at only the events during a certain quake period?
+        # print 'LATENCY RESAMPLED:', picks['latency'].astype('timedelta64[ms]').resample('10ms')
+        return data
+
+    # TODO: sample the latencies by quake period using pd.cut with the bin edges being the quake times (dp change times)
 
     def reachabilities(self, **kwargs):
         """
-        Gets the 'reachability' of the group, which is the normalized # sensors
-        that received any aggregated results messages, which are assumed to actually
-        be some kind of alert.  Thus, this doesn't consider receiving the 'original'
-        event, but just the aggregated one from the server.
-        :param group: dictionary of {filename: parsed_results} pairs representing the
-        results of a single experiment in terms of seismic client outputs
-        :param int nsubscribers: # subscribers being considered (if None, calculates
-        it as len(all subscribers in group))
-        :return: reachability
-        :rtype float:
+        Filters the requested outputs down to just the unique combination of (treatment, run#, seq) and adds a column
+        with the 'reachability' of the group, which is the normalized # sensors that received any alerts.
+        Thus, this doesn't consider receiving the 'original' event, but just the aggregated one from the server.
+        :rtype: pd.DataFrame
         """
 
-        subscribers = cls.get_subscribers(group)
+        # IDEA: we just need alerts, but we need to know how many subscribers there were in total: hence getting empties
+        alerts = self.alerts(include_empty=True, **kwargs)
+        # ignore seq here since we just care about len(subs); drop anything without subs info; group by just
+        # run/treatment and count up the #subs
+        # NOTE: we do reset_index to go back to a DataFrame rather than MultiIndex since we'll be joining on multiple columns
+        nsubs = alerts.drop_duplicates(['sub_id', 'treatment', 'run']).dropna(subset=['sub_id']).groupby(['treatment', 'run'], as_index=False).size().reset_index()
+        # print 'counts:\n', nsubs[(0,"2t_0.15f_5s_5p_steiner_disjoint_campustopo_0.00e_importance")]
 
-        # First, we need to determine nsubscribers if not specified
-        if nsubscribers is None:
-            nsubscribers = len(subscribers)
-            assert nsubscribers > 0, "0 subscribers for group: %s" % group
+        # now determine the # unique sub_ids/ips for a given treatment,run#,event_id(seq) combo: could throw out publisher info
+        # QUESTION: should we also average across the # runs?
+        reached = alerts.drop_duplicates(['sub_id', 'treatment', 'run', 'seq']).dropna(subset=['sub_id']).groupby(['treatment', 'run', 'seq'], as_index=False).size().reset_index()
 
-        # Now we just count the # subscribers that actually received SOME events and then normalize
-        reachability = sum(len(results) > 0 for results in subscribers.values())
-        reachability /= float(nsubscribers)
-        assert reachability <= 1.0, "reachability should be in range [0,1]!!"
-        return reachability
+        # Now we rename last column, merge them, convert one of them into floats, add the new 'reachability' column
+        # as subs_reached/nsubs, cut out the old columns, and return the result
+        nsubs.rename(columns={nsubs.columns[-1]: 'total_subs'}, inplace=True)
+        reached.rename(columns={reached.columns[-1]: 'subs_reached'}, inplace=True)
+        result = pd.merge(nsubs, reached, on=['treatment', 'run'], how='outer')
+        result['reachability'] = result.subs_reached.astype('float64')/result.total_subs
+        del result['subs_reached']
+        del result['total_subs']
 
+        # TODO: should probably support filtering by latency?  can't really count a subscriber as reached if it takes a minute...
+        return result
 
     # TODO: what else? service availability?
 
@@ -527,11 +582,15 @@ if __name__ == '__main__':
     # for outs in stats.iot_congestors():
     # for outs in stats.edge_servers():
     # for outs in stats.cloud_servers():
-    # for outs in [stats.picks()]:  # it's aggregated to a single DF!
-    # for outs in [stats.alerts()]:  # it's aggregated to a single DF!
-    # for outs in [stats.iot_traffic()]:  # it's aggregated to a single DF!
-    for outs in [stats.seismic_events()]:  # it's aggregated to a single DF!
+    # NOTE: the ones below are all aggregated to a single DF!
+    # for outs in [stats.picks()]:
+    # for outs in [stats.alerts()]:
+    # for outs in [stats.iot_traffic()]:
+    # for outs in [stats.seismic_events()]:
+    for outs in [stats.latencies(stats.seismic_events(), resolution='ms')]:
+    # for outs in [stats.reachabilities()]:
         # WARNING: can't do fancy comparison slicing with an empty data frame!
+        print outs.info()
         print outs
 
         # print 'edge alerts:\n', outs[outs.alert_src == 'edge']
