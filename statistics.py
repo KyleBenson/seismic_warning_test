@@ -227,11 +227,12 @@ class SeismicStatistics(object):
         args = vars(args)
         return cls(**args)
 
-    def parse_all(self, dirs_to_parse=None, stats=None):
+    def parse_all(self, dirs_to_parse=None, stats=None, **metadata):
         """
         Parse all of the requested directories, save the stats as self.stats, and return them.
         :param dirs_to_parse: list of directories to parse (self.dirs if None)
         :param stats: dict in which to store the parsed stats (self.stats if None)
+        :param metadata: static column data to add to these parsed results
         :return stats: parsed stats dict
         """
         if dirs_to_parse is None:
@@ -240,14 +241,16 @@ class SeismicStatistics(object):
             stats = self.stats
         for dirname in dirs_to_parse:
             log.debug("parsing directory %s" % dirname)
-            stats[dirname] = self.parse_dir(dirname)
+            if dirname in stats:
+                log.warning("directory '%s' already in stats!" % dirname)
+            stats[dirname] = self.parse_dir(dirname, **metadata)
         return stats
 
-    def parse_dir(self, dirname):
+    def parse_dir(self, dirname, **metadata):
         # TODO: separate into pubs, subs, srv?
         results = dict()
         for filename in os.listdir(dirname):
-            parsed = self.parse_file(os.path.join(dirname, filename))
+            parsed = self.parse_file(os.path.join(dirname, filename), **metadata)
             if parsed is not None:
                 if parsed.empty:
                     log.warning("file %s returned empty results!" % filename)
@@ -256,7 +259,7 @@ class SeismicStatistics(object):
                 results[filename] = parsed
         return results
 
-    def parse_file(self, fname):
+    def parse_file(self, fname, **metadata):
         with open(fname) as f:
             data = f.read()
 
@@ -283,6 +286,7 @@ class SeismicStatistics(object):
             if treatment:
                 cols['treatment'] = treatment
             # TODO: make the values in cols all categories?  certainly shouldn't be null.... unless we merge with non-mininet version?
+            cols.update(metadata)
 
             if host_type == 'subscriber':
                 return SubscriberOutput(data, **cols)
