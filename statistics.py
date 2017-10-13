@@ -267,9 +267,10 @@ class SeismicStatistics(object):
             path_parts, fname = os.path.split(fname)
             # the files themselves are stored in a directory for that experiment run, with each of these run dirs
             # appearing under a directory named for the experimental treatment
-            path_parts, run_dir = os.path.split(path_parts)
-            path_parts, treatment = os.path.split(path_parts)
-            treatment = treatment.replace('outputs_', '')  # the dir usually starts with this, so just cut it off
+            # NOTE: we want to keep the full pathname to the experimental treatment directory in case we're parsing
+            # multiple directories with the same actual treatment e.g. 'results/<treatment>/run0 results2/<treatment>run0'
+            # This is likely if we do a bunch of runs but in multiple rounds
+            treatment, run_dir = os.path.split(path_parts)
             try:
                 run = parse.parse('run{:d}', run_dir)[0]
             except IndexError:
