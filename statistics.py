@@ -12,7 +12,6 @@ import sys
 import os
 import json
 import logging
-logging.basicConfig()
 log = logging.getLogger(__name__)
 
 from scale_client.core.sensed_event import SensedEvent
@@ -302,6 +301,16 @@ class SeismicStatistics(object):
     ## Gathering certain types of results, which becomes hierarchical to build up to our final results
     #########################################################################################################
 
+    # Helper function for merging together >2 data frames into one
+    def merge_all(self, *dfs):
+        """
+        Merges every data frame in dfs until only one is left.  This uses the 'reduce' function, 'outer' join,
+        and doesn't sort the rows.
+        :param dfs:
+        :return:
+        """
+        return reduce(lambda left, right: pd.merge(left, right, how='outer', sort=False), dfs)
+
     ## Level 0: filter by treatment group (directory name) and arbitrary column parameters
 
     # This will be used for the others
@@ -359,8 +368,8 @@ class SeismicStatistics(object):
         edges = [df[df.topic == SEISMIC_PICK_TOPIC] for df in self.edge_servers(**kwargs)]
 
         # merge the lists down to a single DataFrame
-        pubs = reduce(lambda left, right: pd.merge(left, right, how='outer', sort=False), pubs)
-        servers = reduce(lambda left, right: pd.merge(left, right, how='outer', sort=False), clouds + edges)
+        pubs = self.merge_all(*pubs)
+        servers = self.merge_all(*(clouds + edges))
 
         # before joining the two tables, handle removing/renaming some columns that would cause conflicts:
         # - all useless: pubs.source, servers.host_ip/id, pubs.host_type
@@ -389,8 +398,8 @@ class SeismicStatistics(object):
         edges = [df[df.topic == SEISMIC_PICK_TOPIC] for df in self.edge_servers(**kwargs)]
 
         # merge the lists down to a single DataFrame
-        subs = reduce(lambda left, right: pd.merge(left, right, how='outer', sort=False), subs)
-        servers = reduce(lambda left, right: pd.merge(left, right, how='outer', sort=False), clouds + edges)
+        subs = self.merge_all(*subs)
+        servers = self.merge_all(*(clouds + edges))
 
         # before joining the two tables, handle removing/renaming some columns that would cause conflicts:
         # - all useless: servers.host_ip/id, subs.host_type
@@ -417,8 +426,8 @@ class SeismicStatistics(object):
         edges = [df[df.topic == IOT_GENERIC_TOPIC] for df in self.edge_servers(**kwargs)]
 
         # merge the lists down to a single DataFrame
-        pubs = reduce(lambda left, right: pd.merge(left, right, how='outer', sort=False), pubs)
-        servers = reduce(lambda left, right: pd.merge(left, right, how='outer', sort=False), clouds + edges)
+        pubs = self.merge_all(*pubs)
+        servers = self.merge_all(*(clouds + edges))
 
         # before joining the two tables, handle removing/renaming some columns that would cause conflicts:
         # - all useless: pubs.source, servers.host_ip/id, pubs.host_type
@@ -568,6 +577,8 @@ class SeismicStatistics(object):
 
 
 if __name__ == '__main__':
+    logging.basicConfig()  # needed when run standalone
+
     # lets you print the data frames out on a wider screen
     pd.set_option('display.max_columns', 15)  # seismic_events has 14 columns
     pd.set_option('display.width', 2500)
