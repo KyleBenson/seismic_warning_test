@@ -54,6 +54,7 @@ class ParsedSeismicOutput(pd.DataFrame):
         :type data: str
         :param kwargs: additional static values for columns to distinguish this group of events from others e.g. host_id
         """
+        # NOTE: can't save any attributes until after we run super constructor!
 
         data = json.loads(data)
         # sub-classes may extract the column data in different ways depending on the output format
@@ -281,6 +282,7 @@ class SeismicStatistics(object):
                         )
             if treatment:
                 cols['treatment'] = treatment
+            # TODO: make the values in cols all categories?  certainly shouldn't be null.... unless we merge with non-mininet version?
 
             if host_type == 'subscriber':
                 return SubscriberOutput(data, **cols)
@@ -621,6 +623,13 @@ if __name__ == '__main__':
     # print 'THE DUPES:\n', servers[servers.duplicated(['src_ip', 'run', 'seq'], False)]
     # print "non-null PICKS:\n", len(outs[pd.notnull(outs.sink)])
 
+    ## Using DataFrame.query() (this came from our attempt to make everything merged into a single data frame
+    # can't run empty query
+    # if not param_matches:
+    #     return self.stats
+    # query_string = ' & '.join(('%s == "%s"' % (k, v) for k, v in param_matches.items()))
+    # log.debug("running query: %s" % query_string)
+    # return self.stats.query(query_string)
 
     #### WARNINGS to watch out for during data analysis:
     #
