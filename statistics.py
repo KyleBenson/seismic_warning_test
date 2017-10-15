@@ -19,6 +19,8 @@ from seismic_alert_common import *
 from config import get_ip_mac_for_host
 
 DEFAULT_TIMEZONE='America/Los_Angeles'
+# we only count an alert as delivered (i.e. for calculating reachability) if it's received within this many ms:
+MAX_TOLERATED_ALERT_DELAY = 10000
 
 
 def get_host_ip(hid):
@@ -514,16 +516,20 @@ class SeismicStatistics(object):
         """
 
         # IDEA: we just need alerts, but we need to know how many subscribers there were in total: hence getting empties
-        alerts = self.alerts(include_empty=True, **kwargs)
+        # XXX: also we want to ensure alerts were received in a timely manner, so we get the latency and filter later
+        alerts = self.seismic_events(include_empty=True, **kwargs)
+
         # ignore seq here since we just care about len(subs); drop anything without subs info; group by just
         # run/treatment and count up the #subs
         # NOTE: we do reset_index to go back to a DataFrame rather than MultiIndex since we'll be joining on multiple columns
         nsubs = alerts.drop_duplicates(['sub_id', 'treatment', 'run']).dropna(subset=['sub_id']).groupby(['treatment', 'run'], as_index=False).size().reset_index()
-        # print 'counts:\n', nsubs[(0,"2t_0.15f_5s_5p_steiner_disjoint_campustopo_0.00e_importance")]
 
         # now determine the # unique sub_ids/ips for a given treatment,run#,event_id(seq) combo: could throw out publisher info
         # QUESTION: should we also average across the # runs?
-        reached = alerts.drop_duplicates(['sub_id', 'treatment', 'run', 'seq']).dropna(subset=['sub_id']).groupby(['treatment', 'run', 'seq'], as_index=False).size().reset_index()
+        reached = alerts.drop_duplicates(['sub_id', 'treatment', 'run', 'seq']).dropna(subset=['sub_id'])
+        # do the filtering by latency after we get the total # subs and before we do the groupby that would remove the column:
+        reached = self.latencies(reached).query('latency < %d' % MAX_TOLERATED_ALERT_DELAY)
+        reached = reached.groupby(['treatment', 'run', 'seq'], as_index=False).size().reset_index()
 
         # Now we rename last column, merge them, convert one of them into floats, add the new 'reachability' column
         # as subs_reached/nsubs, cut out the old columns, and return the result
@@ -534,7 +540,6 @@ class SeismicStatistics(object):
         del result['subs_reached']
         del result['total_subs']
 
-        # TODO: should probably support filtering by latency?  can't really count a subscriber as reached if it takes a minute...
         return result
 
     # TODO: what else? service availability?
@@ -605,9 +610,8 @@ if __name__ == '__main__':
     # for outs in [stats.alerts()]:
     # for outs in [stats.iot_traffic()]:
     # for outs in [stats.seismic_events()]:
-    for outs in [stats.latencies(stats.seismic_events(), resolution='ms')]:
     # for outs in [stats.reachabilities()]:
-        # WARNING: can't do fancy comparison slicing with an empty data frame!
+    for outs in [stats.latencies(stats.seismic_events(), resolution='ms')]:
         print outs.info()
         print outs
 
