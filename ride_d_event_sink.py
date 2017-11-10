@@ -6,7 +6,7 @@ from threading import Lock
 
 log = logging.getLogger(__name__)
 
-from ride.ride_d import RideD
+from ride.ride_d import RideD, nx
 
 from scale_client.event_sinks.event_sink import ThreadedEventSink
 from scale_client.networks.coap_server import CoapServer
@@ -127,7 +127,7 @@ class RideDEventSink(ThreadedEventSink):
 
         super(RideDEventSink, self).on_start()
 
-    def __sendto(self, msg, topic, address, port=None):
+    def __sendto(self, msg, topic, address, port=None, callback=None):
         """
         Sends msg to the specified address using CoAP.  topic is used to define the path of the CoAP
         resource we PUT the msg in.
@@ -135,10 +135,13 @@ class RideDEventSink(ThreadedEventSink):
         :param topic:
         :param address:
         :param port:
+        :param callback: called upon receiving a response the this message (default=self.__put_event_callback)
         :return:
         """
         if port is None:
             port = self.port
+        if callback is None:
+            callback = self.__put_event_callback
 
         # TODO: don't hardcode this...
         path = "/events/%s" % topic
@@ -148,15 +151,20 @@ class RideDEventSink(ThreadedEventSink):
         self.coap_client.server = (address, port)
 
         # Use async mode to send this message as otherwise sending a bunch of them can lead to a back log...
-        self.coap_client.put(path=path, payload=msg, callback=self.__put_event_callback)
+        self.coap_client.put(path=path, payload=msg, callback=callback)
 
         log.debug("RIDE-D message sent: topic=%s ; address=%s ; payload_length=%d" % (topic, address, len(msg)))
 
-    def __put_event_callback(self, response):
+    def __put_event_callback(self, response, mdmt_used=None):
         """
-        This callback handles the CoAP response for a PUT message.  Currently it just logs the success or failure.
+        This callback handles the CoAP response for a PUT message.  In addition to logging the success or failure it
+        notifies RideD of the response's route (using the provided mdmt_used parameter) if configured for
+        reliable multicast delivery.
         :param response:
         :type response: coapthon.messages.response.Response
+        :param mdmt_used: if specified, the request was sent via reliable multicast and this parameter represents the
+        multicast tree used
+        :type mdmt_used: nx.Graph
         :return:
         """
 
@@ -166,16 +174,26 @@ class RideDEventSink(ThreadedEventSink):
         if response is None:
             return
         elif coap_response_success(response):
-            log.debug("successfully sent alert!")
+            log.debug("successfully sent alert to " + str(response.source))
+
+            if mdmt_used:
+                # determine the path used by this response and notify RideD that it is currently functional
+                responder_ip_addr = response.source[0]
+                responder = self.rided.topology_manager.get_host_by_ip(responder_ip_addr)
+                route = nx.shortest_path(mdmt_used, responder, self.rided.get_server_id())
+                # XXX: just directly update the STT... perhaps we should have an API in RideD for this in the future?
+                self.rided.stt_mgr.route_update(route)
+                log.debug("updating STT with response route: %s" % route)
+
         elif response.code == CoapCodes.NOT_FOUND.number:
-            log.debug("remote rejected PUT request for uncreated object: did you forget to add that resource?")
+            log.warning("remote rejected PUT request for uncreated object: did you forget to add that resource?")
         else:
             log.error("failed to send aggregated events due to Coap error: %s" % coap_code_to_name(response.code))
 
     def send_event(self, event):
         """
-        When charged with sending raw data, we will send the message as configured
-        we'll actually choose the best MDMT for resilient multicast delivery."""
+        When charged with sending an event, we will send it to each subscriber.  If configured for using multicast,
+        we first choose the best MDMT for resilient multicast delivery."""
 
         topic = event.topic
         encoded_event = self.encode_event(event)
@@ -189,12 +207,20 @@ class RideDEventSink(ThreadedEventSink):
                 assert self.rided is not None, "woops!  Ride-D should be set up but it isn't..."
 
                 try:
-                    address = self.rided.get_best_multicast_address(topic)
-                    log.debug("using best available MDMT %s" % address)
-                    self.__sendto(encoded_event, topic=topic, address=address)
+                    mdmt = self.rided.get_best_mdmt(topic)
                 except KeyError:
                     log.error("currently-unhandled error likely caused by trying to MDMT-multicast"
                               " an alert to an unregistered topic with no MDMTs!")
+                    return False
+
+                address = self.rided.get_address_for_mdmt(mdmt)
+                log.debug("using best available MDMT with address %s" % address)
+
+                # The callback needs to know which MDMT was used so that it can determine the response's route and
+                # update the STT accordingly.
+                def __mdmt_response_callback(response):
+                    self.__put_event_callback(response, mdmt)
+                self.__sendto(encoded_event, topic=topic, address=address, callback=__mdmt_response_callback)
 
             # Configured as unicast, so send a message to each subscriber individually
             else:
