@@ -1,13 +1,11 @@
 # seismic_warning_test
-Components for simulating a simplified seismic awareness scenario.  Clients report "picks", a server aggregates them,
- and clients receive notifications of which devices picked for localized situational awareness.
- 
+RIDE-enabled SCALE Client components for simulating a simplified seismic awareness scenario. Clients report "picks", a server aggregates them, and clients receive notifications of which devices picked for localized situational awareness.
+
 ## Getting started
 
-### Setting up RIDE
+Clone the [RIDE repo](https://github.com/KyleBenson/ride) and follow directions for how to set it up with the Mininet-based experiments, which this repo was designed to support.
 
 You'll need to enable access to the RIDE Python package.  I do this by simply putting a symbolic link in this directory that points to the package.  If your PYTHONPATH includes '.', this should allow the modules to `import ride`.
-
 
 ## Using the seismic_alert SCALE modules
 
@@ -19,27 +17,15 @@ to do this manually but we didn't want to add the extra out-of-band configuratio
 
 After running the experiment (probably using Mininet), put the output files into a single directory.  When you have
 several experiments that you want to compare, run the statistics.py file on those directories to see the results
-displayed using matplotlib.
+parsed using Pandas.  We loaded them into non-Python-based plotting systems afterwards, but you could easily extend `statistics.py` to immediately plot them using matplotlib.
 
 ASSUMPTIONS
--- Clients repeatedly send picks once the earthquake happens up to a specified number of copies.
--- The aggregation server collects all picks during its buffering period in a dict and sends them in an array.
+-- Clients repeatedly send picks once the earthquake happens until it quits.
+-- The aggregation server collects all picks during its buffering period in a dict and sends them in an array as just the publisher IP address and earthquake *sequence number*.
 -- The Aggregator keeps sending all of the picks received to date each buffering period.
 
-JSON schemas for events
--- At start of single event's lifetime:
-{'id' : client_id,
-'time_sent' : 123333434.3314,
--- When aggregated, the server puts them all in an array and adds some fields:
-{'id' : 'aggregator',
-'time_aggd' : 232423324.223,
-'events' : [{event}, {event}, ....]
-}
--- Upon receiving an event, the client adds some additional info to each event:
-{'time_rcvd' : 1320290202.232,
-'copies_rcvd' : 3}
--- It also indexes them by ID to track which ones it's received so far
- before finally outputting this results dict to a file as JSON:
-{'h1' : {'id' : 'h1', ...},
-'h2' : {...}
-}
+
+## TODO
+* Document JSON schemas for events as they move from pick --> alert --> subscriber receiving the alert
+* Similarly, document `statistics.py` and what exactly that data format represents
+* Potentially just merge this repo back into the main RIDE repo?  The point is that this one is supposed to be the SCALE extension, but the main repo relies on it so it's probably better integrated directly back into RIDE...
