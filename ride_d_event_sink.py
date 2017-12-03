@@ -38,14 +38,18 @@ class RideDEventSink(ThreadedEventSink):
                                 PUBLISHER_ROUTE_TOPIC,
                                 ),
                  maintenance_interval=10,
-                 multicast=True, port=DEFAULT_COAP_PORT, topics_to_sink=(SEISMIC_ALERT_TOPIC,), **kwargs):
+                 multicast=True, dst_port=DEFAULT_COAP_PORT, topics_to_sink=(SEISMIC_ALERT_TOPIC,), **kwargs):
         """
         See also the parameters for RideD constructor!
         :param ntrees: # MDMTs to build (passed to RideD constructor); note that setting this to 0 disables multicast!
 
         :param broker:
-        :param address_pool: iterable of IP addresses (formatted as strings) that can be used to register multicast trees
-        :param port: port number to send events to (NOTE: we expect all subscribers to listen on the same port OR
+        :param addresses: iterable of network addresses (i.e. tuples of (str[ipv4_src_addr], udp_src_port))
+               that can be used to register multicast trees and send alert packets through them
+               ****NOTE: we use udp_src_port rather than the expected dst_port because this allows the clients to
+               respond to this port# and have the response routed via the proper MDMT
+
+        :param dst_port: port number to send events to (NOTE: we expect all subscribers to listen on the same port OR
         for you to configure the flow rules to convert this port to the expected one before delivery to subscriber)
         :param topics_to_sink: a SensedEvent whose topic matches one in this list will be
         resiliently multicast delivered; others will be ignored
@@ -60,7 +64,7 @@ class RideDEventSink(ThreadedEventSink):
         # Catalogue active subscribers' host addresses (indexed by topic with value being a set of subscribers)
         self.subscribers = dict()
 
-        self.port = port
+        self.dst_port = dst_port
         self.maintenance_interval = maintenance_interval
 
         # If we need to do anything with the server right away or expect some logic to be called
@@ -76,28 +80,51 @@ class RideDEventSink(ThreadedEventSink):
         if self.use_multicast and addresses is None:
             raise NotImplementedError("you must specify the multicast 'addresses' parameter if multicast is enabled!")
 
+        # If we aren't doing multicast, we can create a single CoapClient without a specified src_port/address and this
+        # will be filled in for us...
+        # COAPTHON-SPECIFIC: unclear that we'd be able to do this in all future versions...
         if not self.use_multicast:
             self.rided = None
-        elif not BUILD_RIDED_IN_INIT:
-            self.rided = dict(topology_mgr=topology_mgr, dpid=dpid, addresses=addresses, ntrees=ntrees,
-                              tree_choosing_heuristic=tree_choosing_heuristic, tree_construction_algorithm=tree_construction_algorithm)
+            srv_ip = '10.0.0.1'
+            self._coap_clients = {'unicast': CoapClient(server_hostname=srv_ip, server_port=self.dst_port,
+                                                        confirmable_messages=not self.use_multicast)}
+        # Configure RideD and necessary CoapClient instances...
+        # Use a single client for EACH MDMT to connect with each server.  We do this so that we can specify the source
+        # port and have the 'server' (remote subscribers) respond to this port# and therefore route responses along the
+        # same path.  Hence, we need to ensure addresses contains some useable addresses or we'll get null exceptions!
         else:
-            self.rided = RideD(topology_mgr=topology_mgr, dpid=dpid, addresses=addresses, ntrees=ntrees,
-                               tree_choosing_heuristic=tree_choosing_heuristic, tree_construction_algorithm=tree_construction_algorithm)
+            # cmd-line specified addresses might convert them to a list of lists, so make them tuples for hashing!
+            addresses = [tuple(address) for address in addresses]
 
-        # Use a single client to connect with each server
-        # COAPTHON-SPECIFIC: unclear that we'd be able to do this in all future versions...
-        # NOTE: we specify a dummy server_hostname because we'll explicitly set it each time we use the client,
-        # but it has to be a valid one to avoid causing an error...
-        srv_ip = '10.0.0.1'
-        if addresses:
-            srv_ip = addresses[0]
-        self.coap_client = CoapClient(server_hostname=srv_ip, server_port=self.port, confirmable_messages=not self.use_multicast)
+            # This callback is essentially the CoAP implementation for RideD: it uses CoAPthon to send a request to the
+            # given address through a 'helper client' and register a callback for receiving subscriber responses and
+            # notifying RideD of them.
+            # NOTE: a different CoAP message is created for each alert re-try since they're sent as non-CONfirmable!
+            do_send_cb = self.__sendto
+            # We may opt to build RideD in on_start() instead depending on what resources we want available first...
+            self.rided = dict(topology_mgr=topology_mgr, dpid=dpid, addresses=addresses, ntrees=ntrees,
+                              tree_choosing_heuristic=tree_choosing_heuristic, tree_construction_algorithm=tree_construction_algorithm,
+                              alert_sending_callback=do_send_cb)
+            if BUILD_RIDED_IN_INIT:
+                self.rided = RideD(**self.rided)
+
+            # NOTE: we store CoapClient instances in a dict so that we can index them by MDMT address for easily
+            # accessing the proper instance for the chosen MDMT
+            self._coap_clients = dict()
+            for address in addresses:
+                dst_ip, src_port = address
+                self._coap_clients[address] = CoapClient(server_hostname=dst_ip, server_port=self.dst_port,
+                                                         src_port=src_port,
+                                                         confirmable_messages=not self.use_multicast)
 
         # Use thread locks to prevent simultaneous write access to data structures due to e.g.
         # handling multiple simultaneous subscription registrations.
         self.__subscriber_lock = Lock()
 
+    @property
+    def coap_clients(self):
+        # this obscures the fact that we store the clients in a dict
+        return self._coap_clients.values()
 
     def __maintain_topology(self):
         """Runs periodically to check for topology updates, reconstruct the MDMTs if necessary, and update flow
@@ -127,41 +154,58 @@ class RideDEventSink(ThreadedEventSink):
 
         super(RideDEventSink, self).on_start()
 
-    def __sendto(self, msg, topic, address, port=None, callback=None):
+    def __sendto(self, alert_ctx, mdmt):
         """
         Sends msg to the specified address using CoAP.  topic is used to define the path of the CoAP
         resource we PUT the msg in.
-        :param msg:
-        :param topic:
-        :param address:
-        :param port:
-        :param callback: called upon receiving a response the this message (default=self.__put_event_callback)
+        :param alert_ctx:
+        :type alert_ctx: RideD.AlertContext
+        :param mdmt: the MDMT to use for sending this alert; must extract address from it!
         :return:
         """
-        if port is None:
-            port = self.port
-        if callback is None:
-            callback = self.__put_event_callback
+
+        address = self.rided.get_address_for_mdmt(mdmt)
+        topic = alert_ctx.topic
+        msg = alert_ctx.msg
+
+        # The response callback needs to know which MDMT was used so that it can notify RideD about it.
+        def __mdmt_response_callback(response):
+            self.__put_event_callback(response, alert_context=alert_ctx, mdmt_used=mdmt)
+
+        coap_client = self._coap_clients[address]
+
+        return self.__send_alert_from_client(msg, topic, coap_client, __mdmt_response_callback)
+
+    def __send_alert_from_client(self, msg, topic, coap_client, response_callback=None):
+        """
+        Actually sends the message via the specified CoapClient.
+        :param msg:
+        :param topic:
+        :param coap_client: the CoapClient instance to use, which will already have its src/dst_port/addr set
+        :param response_callback: called when the destination responds (e.g. with OK); default is self.__put_event_callback
+        :return:
+        """
 
         # TODO: don't hardcode this...
         path = "/events/%s" % topic
 
-        # By setting the 'server' attribute, we're telling the client what destination to use.
-        # ENHANCE: COAPTHON-SPECIFIC: should probably make some @properties to keep these in line
-        self.coap_client.server = (address, port)
+        if response_callback is None:
+            response_callback = self.__put_event_callback
 
         # Use async mode to send this message as otherwise sending a bunch of them can lead to a back log...
-        self.coap_client.put(path=path, payload=msg, callback=callback)
+        coap_client.put(path=path, payload=msg, callback=response_callback)
 
-        log.debug("RIDE-D message sent: topic=%s ; address=%s ; payload_length=%d" % (topic, address, len(msg)))
+        log.debug("RIDE-D message sent: topic=%s ; address=%s ; payload_length=%d" % (topic, coap_client.server, len(msg)))
 
-    def __put_event_callback(self, response, mdmt_used=None):
+    def __put_event_callback(self, response, alert_context=None, mdmt_used=None):
         """
         This callback handles the CoAP response for a PUT message.  In addition to logging the success or failure it
         notifies RideD of the response's route (using the provided mdmt_used parameter) if configured for
         reliable multicast delivery.
         :param response:
         :type response: coapthon.messages.response.Response
+        :param alert_context: the state of this alert
+        :type alert_context: RideD.AlertContext
         :param mdmt_used: if specified, the request was sent via reliable multicast and this parameter represents the
         multicast tree used
         :type mdmt_used: nx.Graph
@@ -176,14 +220,11 @@ class RideDEventSink(ThreadedEventSink):
         elif coap_response_success(response):
             log.debug("successfully sent alert to " + str(response.source))
 
-            if mdmt_used:
-                # determine the path used by this response and notify RideD that it is currently functional
+            if alert_context and mdmt_used:  # multicast alert!
+                # notify RideD about this successful response
                 responder_ip_addr = response.source[0]
                 responder = self.rided.topology_manager.get_host_by_ip(responder_ip_addr)
-                route = nx.shortest_path(mdmt_used, responder, self.rided.get_server_id())
-                # XXX: just directly update the STT... perhaps we should have an API in RideD for this in the future?
-                self.rided.stt_mgr.route_update(route)
-                log.debug("updating STT with response route: %s" % route)
+                self.rided.notify_alert_response(responder, alert_context, mdmt_used)
 
         elif response.code == CoapCodes.NOT_FOUND.number:
             log.warning("remote rejected PUT request for uncreated object: did you forget to add that resource?")
@@ -207,25 +248,21 @@ class RideDEventSink(ThreadedEventSink):
                 assert self.rided is not None, "woops!  Ride-D should be set up but it isn't..."
 
                 try:
-                    mdmt = self.rided.get_best_mdmt(topic)
+                    self.rided.send_alert(encoded_event, topic)
                 except KeyError:
                     log.error("currently-unhandled error likely caused by trying to MDMT-multicast"
                               " an alert to an unregistered topic with no MDMTs!")
                     return False
 
-                address = self.rided.get_address_for_mdmt(mdmt)
-                log.debug("using best available MDMT with address %s" % address)
-
-                # The callback needs to know which MDMT was used so that it can determine the response's route and
-                # update the STT accordingly.
-                def __mdmt_response_callback(response):
-                    self.__put_event_callback(response, mdmt)
-                self.__sendto(encoded_event, topic=topic, address=address, callback=__mdmt_response_callback)
-
             # Configured as unicast, so send a message to each subscriber individually
             else:
-                for address in self.subscribers.get(topic, []):
-                    self.__sendto(encoded_event, topic=topic, address=address)
+                # For unicast case, we only needed to create one client!
+                coap_client = self.coap_clients[0]
+
+                for dst_ip_address in self.subscribers.get(topic, []):
+                    # But, we do need to set the destination address for that client...
+                    coap_client.server = (dst_ip_address, self.dst_port)
+                    self.__send_alert_from_client(encoded_event, topic=topic, coap_client=coap_client)
 
             return True
 
@@ -345,7 +382,8 @@ class RideDEventSink(ThreadedEventSink):
 
     def on_stop(self):
         """Close any open network connections e.g. CoapClient"""
-        self.coap_client.close()
+        for client in self.coap_clients:
+            client.close()
         super(RideDEventSink, self).on_stop()
 
         # TODO: log error when no subscribers ever connected?
