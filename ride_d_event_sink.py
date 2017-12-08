@@ -298,6 +298,7 @@ class RideDEventSink(ThreadedEventSink):
             if self.rided:
                 for host, route in event.data.items():
                     log.debug("setting publisher route from event: host(%s) --> %s" % (host, route))
+                    host = self.rided.topology_manager.get_host_by_ip(host)
                     self.rided.set_publisher_route(host, route)
 
         else:

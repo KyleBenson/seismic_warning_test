@@ -77,6 +77,17 @@ class RideCApplication(RideC, ThreadedApplication):
         update_event = self.make_event(data=dict(data_path_id=data_path_id, status=link_status), event_type=DATA_PATH_UPDATE_TOPIC)
         self.publish(update_event, topic=DATA_PATH_UPDATE_TOPIC)
 
+    def _on_all_data_paths_down(self):
+        """
+        We need to publish updates about the publishers being re-routed to the edge if all DataPaths are down. Hence,
+        we just override this method here to add this functionality.
+        :return:
+        """
+
+        super(RideCApplication, self)._on_all_data_paths_down()
+        # update ALL the routes since they've been all re-directed
+        self.publish_route_updates(self._host_routes)
+
     def __maintain_topology(self):
         """Runs periodically to check for topology updates, reconstruct the MDMTs if necessary, and update flow
         rules to account for these topology changes or newly-joined/leaving subscribers."""
