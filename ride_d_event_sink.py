@@ -214,6 +214,9 @@ class RideDEventSink(ThreadedEventSink):
 
         # TODO: record results to output later?
 
+        responder_addr = response.source
+        responder_ip_addr = responder_addr[0]
+
         # XXX: when client closes the last response is a NoneType
         if response is None:
             return
@@ -222,12 +225,11 @@ class RideDEventSink(ThreadedEventSink):
 
             if alert_context and mdmt_used:  # multicast alert!
                 # notify RideD about this successful response
-                responder_ip_addr = response.source[0]
                 responder = self.rided.topology_manager.get_host_by_ip(responder_ip_addr)
                 self.rided.notify_alert_response(responder, alert_context, mdmt_used)
 
         elif response.code == CoapCodes.NOT_FOUND.number:
-            log.warning("remote rejected PUT request for uncreated object: did you forget to add that resource?")
+            log.warning("remote %s rejected PUT request for uncreated object: did you forget to add that resource?" % responder_addr)
         else:
             log.error("failed to send aggregated events due to Coap error: %s" % coap_code_to_name(response.code))
 
