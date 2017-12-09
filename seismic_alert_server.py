@@ -77,6 +77,9 @@ class SeismicAlertServer(VirtualSensor):
         # Furthermore, the only time we receive duplicates should be if an ACK is lost since each successive event
         # published should have a different sequence #.
 
+        # To only publish updates when a new event arrives, use this flag
+        new_events = False
+
         alert_time = time.time()
         while not self.events_to_process.empty():
             ev = self.events_to_process.get()
@@ -87,10 +90,14 @@ class SeismicAlertServer(VirtualSensor):
             if ev.data is not None:
                 # TODO: maybe we shouldn't be skipping over ones we've already processed?  nothing to do with them currently though...
                 if ev_id not in self.events_rcvd:
+                    new_events = True
                     # store the time we FIRST packed this event into an alert
                     ev.metadata['alert_time'] = alert_time
                     self.events_rcvd[ev_id] = ev
                 self.__output_events.append(ev)
+
+        if not new_events:
+            return None
 
         # Then aggregate them and return the result for publication
         # ENHANCE: cache this and add new arrivals to it for better efficiency?

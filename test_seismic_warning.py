@@ -103,6 +103,9 @@ class TestSeismicWarning(unittest.TestCase):
         # TODO: probably need to do this generation again, do events.extend(dup_events), and re-work these tests since
         # new changes to our code will break these tests that assume only the source matters...
 
+        # Because we only publish the event after receiving new events to aggregate, we use this flag to check that.
+        once_through = False
+
         # Now feed them to the server in order and get the aggregate a couple times along the way to verify
         # that aggregation is working properly, including the subscriber's duplicate counts.
         for i in range(n_events):
@@ -110,13 +113,18 @@ class TestSeismicWarning(unittest.TestCase):
                 ev = events.pop(0)
                 self.srv.on_event(ev, ev.topic)
             agg = self.srv.read()
-            self.assertEqual(len(agg.data), n_sources, "should have %d events in this aggregate alert after every iteration here!" % n_sources)
+            if not once_through:
+                self.assertEqual(len(agg.data), n_sources, "should have %d events in this aggregate alert after every iteration here!" % n_sources)
 
-            # verify subscriber
-            self.sub.on_event(agg, agg.topic)
-            for stats in self.sub.events_rcvd.values():
-                self.assertEqual(stats['copies_rcvd'], i+1)
-            self.assertEqual(len(self.sub.events_rcvd), n_sources)
+                # verify subscriber only for actual aggregated events
+                self.sub.on_event(agg, agg.topic)
+                for stats in self.sub.events_rcvd.values():
+                    self.assertEqual(stats['copies_rcvd'], i+1)
+                self.assertEqual(len(self.sub.events_rcvd), n_sources)
+
+                once_through = True
+            else:
+                self.assertIsNone(agg.data, "aggd event data should be null after first round through since all remaining rounds are duplciates!")
 
     def test_timestamps(self):
         """Verify that the timestamps of when the original picks were created get carried through;
@@ -162,12 +170,24 @@ class TestSeismicWarning(unittest.TestCase):
         self.assertAlmostEqual(agg_ev.timestamp, aggd_time, delta=delta)
 
         # make more events, push through to sub, and verify it keeps the time FIRST received
+        time.sleep(SLEEP_TIME)
         events = self._generate_events(n_quakes, n_pubs, n_dups)
+        time.sleep(SLEEP_TIME)
         for ev in events:
             self.srv.on_event(ev, ev.topic)
+
+        # XXX: because we've already seen these events, the aggregated event will have null data if we don't add something new!
+        events = self._generate_events(1, 1, 1, sensor_name='new_sensor%d')
+        for ev in events:
+            self.srv.on_event(ev, ev.topic)
+
         ev = self.srv.read()
+        time.sleep(SLEEP_TIME)
         self.sub.on_event(ev, ev.topic)
-        for stats in self.sub.events_rcvd.values():
+        print self.sub.events_rcvd
+        for source, stats in self.sub.events_rcvd.items():
+            if 'new_sensor' in source:
+                continue
             # self.assertAlmostEqual(stats['time_sent'], create_time, delta=delta)
             self.assertAlmostEqual(stats['time_rcvd'], rcv_time, delta=delta)
             # self.assertAlmostEqual(stats['time_aggd'], aggd_time, delta=delta)
@@ -182,6 +202,9 @@ class TestSeismicWarning(unittest.TestCase):
         n_dups = 5
         events = self._generate_events(n_quakes, n_pubs, n_dups)
 
+        # Once we go through once, all duplicates should return events with no data since nothing new to aggregate
+        once_through = False
+
         # Now feed them to the server in order and get the aggregate a couple times along the way to verify
         # that aggregation is working properly, including the subscriber's duplicate counts.
         for i in range(n_dups):
@@ -192,19 +215,25 @@ class TestSeismicWarning(unittest.TestCase):
 
                 # Verify server aggregation
                 agg = self.srv.read()
-                # after first iteration of outer loop, we won't be adding any new events!
-                n_expected_events = n_pubs * ((j+1) if i == 0 else n_quakes)
-                actual_n_events = len(agg.data)
-                self.assertEqual(actual_n_events, n_expected_events,
-                                 "should have %d events in this aggregate alert after quake #%d"
-                                 " but we have %d!" % (n_expected_events, j, actual_n_events))
 
-                # verify subscriber
-                self.sub.on_event(agg, agg.topic)
-                self.assertEqual(len(self.sub.events_rcvd), n_expected_events)
+                # after first iteration of outer loop, we won't be adding any new events!
+                if not once_through:
+                    n_expected_events = n_pubs * ((j+1) if i == 0 else n_quakes)
+                    actual_n_events = len(agg.data)
+                    self.assertEqual(actual_n_events, n_expected_events,
+                                     "should have %d events in this aggregate alert after quake #%d"
+                                     " but we have %d!" % (n_expected_events, j, actual_n_events))
+
+                    # verify subscriber
+                    self.sub.on_event(agg, agg.topic)
+                    self.assertEqual(len(self.sub.events_rcvd), n_expected_events)
+                else:
+                    self.assertIsNone(agg.data, "after first round we only have duplicates so the event should have null data!")
 
                 # ENHANCE: could validate #copies by e.g. extracting seq # and verifying it, but the most recent events
                 # will be only 1 copy whereas the first events will have i+1 copies.
+
+            once_through = True
 
     def test_event_id(self):
         event1_src1 = self.pub.make_event_with_raw_data(5)
@@ -238,7 +267,8 @@ class TestSeismicWarning(unittest.TestCase):
             self.srv.on_event(e, topic=e.topic)
 
         alert = self.srv.read()
-        self.assertFalse(msg_fits_one_coap_packet(alert.to_json()), "alert msg already fits into one packet! add more pick events...")
+        if not expect_one_packet:
+            self.assertFalse(msg_fits_one_coap_packet(alert.to_json()), "alert msg already fits into one packet! add more pick events...")
 
         comp_alert = compress_alert_one_coap_packet(alert)
         self.assertTrue(msg_fits_one_coap_packet(comp_alert), "compressed alert data doesn't actually fit in one packet!")
@@ -257,15 +287,17 @@ class TestSeismicWarning(unittest.TestCase):
             # check to make sure we're using most of the packet.  Note that we assume here nquakes < 1000
             self.assertGreater(len(comp_alert), COAP_MAX_PAYLOAD_SIZE - (len(big_event_id) + 4))
 
-    def test_alert_compression2(self):
-        """Using the above test, verifies some edge conditions and provides opportunity to verify other behaviors."""
+    # Using the above test, now we verify some edge conditions and provides opportunity to verify other behaviors.
 
+    def test_alert_compression_not_full(self):
         # Verify we don't cause errors when there's plenty of room in the packet
         self.test_alert_compression(n_sensors=3, expect_one_packet=True)
 
+    def test_alert_compression_single_event(self):
         # Verify we get no errors with only a single event
         self.test_alert_compression(n_sensors=1, n_quakes=1, expect_one_packet=True)
 
+    # def test_alert_compression_too_many_events(self):
         # with logging enabled, run this to verify that we'll receive an error msg
         # if we had too many new events (highest event ID seq #) to fit in one packet.
         # logging.basicConfig(level=logging.DEBUG)

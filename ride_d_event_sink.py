@@ -117,6 +117,10 @@ class RideDEventSink(ThreadedEventSink):
                                                          src_port=src_port,
                                                          confirmable_messages=not self.use_multicast)
 
+            # Need to track outstanding alerts as we can only have a single one for each topic at a time
+            # since they're updates: index them by    topic --> AlertContext
+            self._outstanding_alerts = dict()
+
         # Use thread locks to prevent simultaneous write access to data structures due to e.g.
         # handling multiple simultaneous subscription registrations.
         self.__subscriber_lock = Lock()
@@ -229,7 +233,7 @@ class RideDEventSink(ThreadedEventSink):
                 self.rided.notify_alert_response(responder, alert_context, mdmt_used)
 
         elif response.code == CoapCodes.NOT_FOUND.number:
-            log.warning("remote %s rejected PUT request for uncreated object: did you forget to add that resource?" % responder_addr)
+            log.warning("remote %s rejected PUT request for uncreated object: did you forget to add that resource?" % str(responder_addr))
         else:
             log.error("failed to send aggregated events due to Coap error: %s" % coap_code_to_name(response.code))
 
@@ -250,7 +254,11 @@ class RideDEventSink(ThreadedEventSink):
                 assert self.rided is not None, "woops!  Ride-D should be set up but it isn't..."
 
                 try:
-                    self.rided.send_alert(encoded_event, topic)
+                    # XXX: we can only have a single outstanding alert at a time for a given topic so
+                    # we need to cancel the last one if it exists.
+                    if topic in self._outstanding_alerts:
+                        self.rided.cancel_alert(self._outstanding_alerts.pop(topic))
+                    self._outstanding_alerts[topic] = self.rided.send_alert(encoded_event, topic)
                 except KeyError:
                     log.error("currently-unhandled error likely caused by trying to MDMT-multicast"
                               " an alert to an unregistered topic with no MDMTs!")
