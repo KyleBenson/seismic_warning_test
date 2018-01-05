@@ -287,7 +287,11 @@ class SeismicStatistics(object):
                         run=run,
                         )
             if treatment:
+                # XXX: cut off run# from treatment name so that we can aggregate them e.g. for averaging over runs
+                if '.' in treatment:
+                    treatment = treatment[:treatment.rfind('.')]
                 cols['treatment'] = treatment
+
             # TODO: make the values in cols all categories?  certainly shouldn't be null.... unless we merge with non-mininet version?
             cols.update(metadata)
 
