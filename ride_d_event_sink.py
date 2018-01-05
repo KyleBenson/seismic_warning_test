@@ -29,6 +29,7 @@ class RideDEventSink(ThreadedEventSink):
                  # TODO: sublcass RideD in order to avoid code repetition here for extracting parameters?
                  dpid, addresses=None, topology_mgr='onos', ntrees=2,
                  tree_choosing_heuristic='importance', tree_construction_algorithm=('red-blue',),
+                 max_retries=None,
                  # XXX: rather than running a separate service that would intercept incoming publications matching the
                  # specified flow for use in the STT, we simply wait for seismic picks and use them as if they're
                  # incoming packets.  This ignores other potential packets from those hosts, but this will have to do
@@ -104,7 +105,7 @@ class RideDEventSink(ThreadedEventSink):
             # We may opt to build RideD in on_start() instead depending on what resources we want available first...
             self.rided = dict(topology_mgr=topology_mgr, dpid=dpid, addresses=addresses, ntrees=ntrees,
                               tree_choosing_heuristic=tree_choosing_heuristic, tree_construction_algorithm=tree_construction_algorithm,
-                              alert_sending_callback=do_send_cb)
+                              alert_sending_callback=do_send_cb, max_retries=max_retries)
             if BUILD_RIDED_IN_INIT:
                 self.rided = RideD(**self.rided)
 
