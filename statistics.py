@@ -16,11 +16,13 @@ log = logging.getLogger(__name__)
 
 from scale_client.core.sensed_event import SensedEvent
 from seismic_alert_common import *
-from config import get_ip_mac_for_host
+from config import get_ip_mac_for_host, VARIED_PARAMETERS
 
 DEFAULT_TIMEZONE='America/Los_Angeles'
 # we only count an alert as delivered (i.e. for calculating reachability) if it's received within this many ms:
 MAX_TOLERATED_ALERT_DELAY = 10000
+# XXX: when parsing empty output, we should use a dummy event to ensure that host appears in at least one row
+EMPTY_OUTPUT_EVENT_TYPE = "dummy_event"
 
 
 def get_host_ip(hid):
@@ -107,6 +109,10 @@ class SensedEventParsedSeismicOutput(ParsedSeismicOutput):
         :return:
         """
         events = [SensedEvent.from_map(e) for e in data]
+        # XXX: to ensure this host shows up in at least one row, we add a dummy event when it had none
+        if not events:
+            events = [SensedEvent(data=True, source="no source", event_type=EMPTY_OUTPUT_EVENT_TYPE)]
+
         cols = {'topic': [ev.topic for ev in events],
                 'time_sent': [ev.timestamp for ev in events],
                 # TODO: might not even want this? what to do with it? the 'scale-local:/' part makes it less useful...
@@ -137,7 +143,11 @@ class ServerOutput(SensedEventParsedSeismicOutput):
     def extract_columns(cls, data):
         """We need to extract the time each pick was received at the server for processing"""
         cols = super(ServerOutput, cls).extract_columns(data)
-        cols['time_rcvd'] = [cls.get_aggregation_time(ev) for ev in (SensedEvent.from_map(e) for e in data)]
+        # XXX: dummy data to ensure empty results parse okay and create a row
+        if not data:
+            cols['time_rcvd'] = [0]
+        else:
+            cols['time_rcvd'] = [cls.get_aggregation_time(ev) for ev in (SensedEvent.from_map(e) for e in data)]
         cols['src_ip'] = [get_hostname_from_path(src) for src in cols.pop('source')]
         return cols
 
@@ -160,6 +170,12 @@ class SubscriberOutput(ParsedSeismicOutput):
 
     @classmethod
     def extract_columns(cls, data):
+        """:type data: dict"""
+        # XXX: ensure we have SOME data so that this subscriber will appear in a row
+        if not data:
+            return {'seq': [-1], 'pub_ip': ['127.0.0.1'], 'time_alert_rcvd': [0],
+                    'copies_rcvd': [0], 'alert_src': ['dummy']}
+
         return {'seq': [get_seq_from_event_id(event_id) for event_id, metadata in data.items()],
                 'pub_ip': [get_source_from_event_id(event_id) for event_id, metadata in data.items()],
                 'time_alert_rcvd': [metadata['time_rcvd'] for event_id, metadata in data.items()],
@@ -255,7 +271,7 @@ class SeismicStatistics(object):
             parsed = self.parse_file(os.path.join(dirname, filename), **metadata)
             if parsed is not None:
                 if parsed.empty:
-                    log.warning("file %s returned empty results!" % filename)
+                    log.warning("file %s returned empty results!  this should've been fixed via dummy events..." % filename)
                 else:
                     log.debug('parsed file %s; returned %s results with head: %s' % (filename, parsed.__class__.__name__, parsed.head()))
                 results[filename] = parsed
@@ -340,6 +356,10 @@ class SeismicStatistics(object):
             groups = self.stats.items()
         else:
             groups = ((group, self.stats[group]),)
+
+        # TODO: fix this for the case that we specify include_empty=False, which will still include 'empty' results
+        # due to us adding dummy events when they're empty.
+
         return [parsed for group, file_results in groups for fname, parsed in file_results.items() if
                 (not parsed.empty or include_empty) and all((parsed[k] == v).all() for k, v in param_matches.items())]
 
@@ -377,8 +397,11 @@ class SeismicStatistics(object):
         # merge cloud/edge server, then join these two tables so we have time_sent, time_rcvd, and sink=cloud/srv
         pubs = self.publishers(**kwargs)
         # also filter out the generic_iot_data from these
-        clouds = [df[df.topic == SEISMIC_PICK_TOPIC] for df in self.cloud_servers(**kwargs)]
-        edges = [df[df.topic == SEISMIC_PICK_TOPIC] for df in self.edge_servers(**kwargs)]
+        # make sure to filter out empty cloud/edge server results or we'll cause errors...
+        clouds = [df for df in self.cloud_servers(**kwargs) if 'topic' in df and not df.empty]
+        clouds = [df[df.topic == SEISMIC_PICK_TOPIC] for df in clouds]
+        edges = [df for df in self.edge_servers(**kwargs) if 'topic' in df and not df.empty]
+        edges = [df[df.topic == SEISMIC_PICK_TOPIC] for df in edges]
 
         # merge the lists down to a single DataFrame
         pubs = self.merge_all(*pubs)
@@ -407,8 +430,11 @@ class SeismicStatistics(object):
         # same as with picks() but with subscribers now, alert_src=cloud/srv, and time_sent being from the metadata alert_time
         subs = self.subscribers(**kwargs)
         # also filter out the generic_iot_data from these
-        clouds = [df[df.topic == SEISMIC_PICK_TOPIC] for df in self.cloud_servers(**kwargs)]
-        edges = [df[df.topic == SEISMIC_PICK_TOPIC] for df in self.edge_servers(**kwargs)]
+        # make sure to filter out empty cloud/edge server results or we'll cause errors...
+        clouds = [df for df in self.cloud_servers(**kwargs) if 'topic' in df and not df.empty]
+        clouds = [df[df.topic == SEISMIC_PICK_TOPIC] for df in clouds]
+        edges = [df for df in self.edge_servers(**kwargs) if 'topic' in df and not df.empty]
+        edges = [df[df.topic == SEISMIC_PICK_TOPIC] for df in edges]
 
         # merge the lists down to a single DataFrame
         subs = self.merge_all(*subs)
@@ -435,8 +461,11 @@ class SeismicStatistics(object):
         :rtype: pd.DataFrame"""
         # same as with picks just with different topics
         pubs = self.iot_congestors(**kwargs)
-        clouds = [df[df.topic == IOT_GENERIC_TOPIC] for df in self.cloud_servers(**kwargs)]
-        edges = [df[df.topic == IOT_GENERIC_TOPIC] for df in self.edge_servers(**kwargs)]
+        # make sure to filter out empty cloud/edge server results or we'll cause errors when is_empty=True was requested
+        clouds = [df for df in self.cloud_servers(**kwargs) if 'topic' in df and not df.empty]
+        clouds = [df[df.topic == IOT_GENERIC_TOPIC] for df in clouds]
+        edges = [df for df in self.edge_servers(**kwargs) if 'topic' in df and not df.empty]
+        edges = [df[df.topic == IOT_GENERIC_TOPIC] for df in edges]
 
         # merge the lists down to a single DataFrame
         pubs = self.merge_all(*pubs)
@@ -516,33 +545,45 @@ class SeismicStatistics(object):
         Filters the requested outputs down to just the unique combination of (treatment, run#, seq) and adds a column
         with the 'reachability' of the group, which is the normalized # sensors that received any alerts.
         Thus, this doesn't consider receiving the 'original' event, but just the aggregated one from the server.
+        NOTE: the 'treatment' column is just one of many varied parameters used in the unique combination! see config.py
         :rtype: pd.DataFrame
         """
 
-        # IDEA: we just need alerts, but we need to know how many subscribers there were in total: hence getting empties
+        # IDEA: we need to collect alerts into proper groups and divide by total #subs for each of those treatment groups
         # XXX: also we want to ensure alerts were received in a timely manner, so we get the latency and filter later
-        alerts = self.seismic_events(include_empty=True, **kwargs)
+        alerts = self.seismic_events(**kwargs)
 
-        # ignore seq here since we just care about len(subs); drop anything without subs info; group by just
-        # run/treatment and count up the #subs
-        # NOTE: we do reset_index to go back to a DataFrame rather than MultiIndex since we'll be joining on multiple columns
-        nsubs = alerts.drop_duplicates(['sub_id', 'treatment', 'run']).dropna(subset=['sub_id']).groupby(['treatment', 'run'], as_index=False).size().reset_index()
+        # Filter params by available columns so we can ignore those that will cause errors for being missing
+        # NOTE: we used to assume the 'treatment' contains all varied params, but we explicitly group by the params
+        # now instead to handle different treatment names that e.g. might be missing a new param
+        varied_params = [p for p in VARIED_PARAMETERS if p in alerts] + ['run', 'seq']
 
         # now determine the # unique sub_ids/ips for a given treatment,run#,event_id(seq) combo: could throw out publisher info
-        # QUESTION: should we also average across the # runs?
-        reached = alerts.drop_duplicates(['sub_id', 'treatment', 'run', 'seq']).dropna(subset=['sub_id'])
-        # do the filtering by latency after we get the total # subs and before we do the groupby that would remove the column:
-        reached = self.latencies(reached).query('latency < %d' % MAX_TOLERATED_ALERT_DELAY)
-        reached = reached.groupby(['treatment', 'run', 'seq'], as_index=False).size().reset_index()
+        #    since we're ignoring multiple publisher sources that each arrive at the subscriber in alerts.
+        # WARNING: we need to save all of the unique treatments, runs, event sequence #s for the cases that they'll
+        # be dropped along the way (e.g. no subscribers received an event) but should really produce 0 reachability.
+        all_treatments = alerts[varied_params].drop_duplicates()
 
-        # Now we rename last column, merge them, convert one of them into floats, add the new 'reachability' column
-        # as subs_reached/nsubs, cut out the old columns, and return the result
-        nsubs.rename(columns={nsubs.columns[-1]: 'total_subs'}, inplace=True)
+        # Filter latency first in case one alert_src gets it to the sub faster
+        #    (also note that groupby would remove the latency column)
+        # NOTE: dropna() isn't really necessary since latency filtering always drops these
+        reached = self.latencies(alerts.dropna(subset=['sub_id'])).query('latency < %d' % MAX_TOLERATED_ALERT_DELAY)
+
+        # ENHANCE: don't just drop duplicates, but take the one with lower latency
+        reached = reached.drop_duplicates(['sub_id'] + varied_params)
+        # NOTE: we do reset_index to go back to a DataFrame rather than MultiIndex since we'll be joining on multiple columns
+        reached = reached.groupby(varied_params, as_index=False).size().reset_index()
+
+        # Now we add the new 'reachability' column as subs_reached/nsubs (converting nsubs into floats).
+        # NOTE: the last column is the one with our counts, so we rename it first in order to carefully delete it after
         reached.rename(columns={reached.columns[-1]: 'subs_reached'}, inplace=True)
-        result = pd.merge(nsubs, reached, on=['treatment', 'run'], how='outer')
-        result['reachability'] = result.subs_reached.astype('float64')/result.total_subs
+        result = reached
+        result['reachability'] = result.subs_reached.astype('float64')/result.nsubscribers
         del result['subs_reached']
-        del result['total_subs']
+
+        # Lastly, merge the results with the all_treatments DataFrame to bring back in any 0-reachability rows lost
+        result = pd.merge(result, all_treatments, on=varied_params, suffixes=('', '_default'), how='outer')
+        result.reachability[result.reachability.isnull()] = 0.0
 
         return result
 
