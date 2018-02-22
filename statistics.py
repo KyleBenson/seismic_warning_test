@@ -422,6 +422,50 @@ class SeismicStatistics(object):
         picks = pubs.merge(servers,  how='left')
         return picks
 
+    def collection_rate(self, **kwargs):
+        """
+        Takes result of self.picks(**kwargs) and appends a new column 'rcv_rate' that consists of the
+        rate (i.e. in range [0,1]) at which picks were received by either cloud or edge server.
+        :param kwargs:
+        :rtype: pd.DataFrame
+        """
+        # NOTE: this function based on self.reachabilities()
+        picks = self.picks(**kwargs)
+
+        # Filter params by available columns so we can ignore those that will cause errors for being missing
+        # NOTE: we used to assume the 'treatment' contains all varied params, but we explicitly group by the params
+        # now instead to handle different treatment names that e.g. might be missing a new param
+        varied_params = [p for p in VARIED_PARAMETERS if p in picks] + ['run', 'seq']
+
+        # now determine the # unique pub_ids/ips for a given treatment,run#,event_id(seq) combo
+        # WARNING: we need to save all of the unique treatments, runs, event sequence #s for the cases that they'll
+        # be dropped along the way (e.g. no server received an event) but should really produce 0 rcv_rate.
+        all_treatments = picks[varied_params].drop_duplicates()
+
+        # Filter latency first in case one pub gets it to the server faster
+        #    (also note that groupby would remove the latency column)
+        # NOTE: dropna() isn't really necessary since latency filtering always drops these
+        reached = self.latencies(picks).query('latency < %d' % MAX_TOLERATED_ALERT_DELAY)
+
+        # ENHANCE: don't just drop duplicates, but take the one with lower latency
+        reached = reached.drop_duplicates(['src_id'] + varied_params)
+
+        # NOTE: we do reset_index to go back to a DataFrame rather than MultiIndex since we'll be joining on multiple columns
+        reached = reached.groupby(varied_params, as_index=False).size().reset_index()
+
+        # Now we add the new 'rcv_rate' column as pubs_rcvd/npubs (converting npubs into floats).
+        # NOTE: the last column is the one with our counts, so we rename it first in order to carefully delete it after
+        reached.rename(columns={reached.columns[-1]: 'pubs_rcvd'}, inplace=True)
+        result = reached
+        result['rcv_rate'] = result.pubs_rcvd.astype('float64')/result.npublishers
+        del result['pubs_rcvd']
+
+        # Lastly, merge the results with the all_treatments DataFrame to bring back in any 0-reachability rows lost
+        result = pd.merge(result, all_treatments, on=varied_params, suffixes=('', '_default'), how='outer')
+        result.rcv_rate[result.rcv_rate.isnull()] = 0.0
+
+        return result
+
     def alerts(self, **kwargs):
         """
         The seismic alerts sent from the server, which aggregated all the recent picks, to the subscribers
@@ -508,8 +552,8 @@ class SeismicStatistics(object):
         is in the optionally requested resolution.  The 'sending time' and 'receiving time' are calculated by trying
         to find the difference of the relevant attributes in the following order:
         1) seismic_events are 'time_pick_sent/time_alert_rcvd'
-        2) picks/traffic are 'time_sent/time_rcvd'
-        3) alerts are 'time_alert_sent/time_alert_rcvd'
+        2) alerts are 'time_alert_sent/time_alert_rcvd'
+        3) picks/traffic are 'time_sent/time_rcvd'
 
         :param data: the data to compute latencies on
         :type data: pd.DataFrame
